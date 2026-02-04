@@ -10,6 +10,7 @@ Handles:
 
 import asyncio
 import logging
+import time
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 from uuid import uuid4
 
@@ -20,6 +21,8 @@ from .models import (
     MessageRole,
     RoutingStrategy,
     ErrorHandlingStrategy,
+    ExecutionEvent,
+    ExecutionEventType,
 )
 from .agent_node import AgentNode, AgentTree
 from .context import (
@@ -187,6 +190,370 @@ class TreeExecutor:
         # Execute with streaming
         async for update in self._execute_node_stream(start_node, context):
             yield update
+
+    async def run_stream_with_events(
+        self,
+        input_message: str,
+        workflow_id: str,
+        execution_id: str,
+        context: Optional[ExecutionContext] = None,
+        start_node_id: Optional[str] = None,
+    ) -> AsyncIterator[ExecutionEvent]:
+        """
+        Execute the agent tree with detailed execution events.
+
+        Yields ExecutionEvent objects for real-time visualization.
+        """
+        await self.initialize()
+
+        # Emit workflow start event
+        yield ExecutionEvent(
+            event_type=ExecutionEventType.WORKFLOW_START,
+            timestamp=time.time(),
+            workflow_id=workflow_id,
+            execution_id=execution_id,
+            metadata={"input_message": input_message},
+        )
+
+        start_time = time.time()
+
+        # Create context
+        if context is None:
+            context = ExecutionContext(
+                execution_id=execution_id,
+                max_depth=self.tree.get_max_depth() + 5,
+            )
+
+        context.add_message(ChatMessage(
+            role=MessageRole.USER,
+            content=input_message,
+        ))
+
+        # Get starting node
+        start_node = None
+        if start_node_id:
+            start_node = self.tree.get_node(start_node_id)
+        if not start_node:
+            start_node = self.tree.get_root()
+
+        if not start_node:
+            yield ExecutionEvent(
+                event_type=ExecutionEventType.WORKFLOW_ERROR,
+                timestamp=time.time(),
+                workflow_id=workflow_id,
+                execution_id=execution_id,
+                error="No root node found in tree",
+            )
+            return
+
+        try:
+            # Execute with events
+            async for event in self._execute_node_with_events(
+                start_node, context, workflow_id, execution_id, depth=0
+            ):
+                yield event
+
+            # Emit workflow complete event
+            duration_ms = (time.time() - start_time) * 1000
+            yield ExecutionEvent(
+                event_type=ExecutionEventType.WORKFLOW_COMPLETE,
+                timestamp=time.time(),
+                workflow_id=workflow_id,
+                execution_id=execution_id,
+                duration_ms=duration_ms,
+                status="completed",
+            )
+
+        except Exception as e:
+            duration_ms = (time.time() - start_time) * 1000
+            yield ExecutionEvent(
+                event_type=ExecutionEventType.WORKFLOW_ERROR,
+                timestamp=time.time(),
+                workflow_id=workflow_id,
+                execution_id=execution_id,
+                error=str(e),
+                duration_ms=duration_ms,
+            )
+
+    async def _execute_node_with_events(
+        self,
+        node: AgentNode,
+        context: ExecutionContext,
+        workflow_id: str,
+        execution_id: str,
+        depth: int = 0,
+    ) -> AsyncIterator[ExecutionEvent]:
+        """Execute a node and yield detailed events."""
+        if not node.enabled:
+            return
+
+        node_start_time = time.time()
+
+        # Emit node start event
+        yield ExecutionEvent(
+            event_type=ExecutionEventType.NODE_START,
+            timestamp=time.time(),
+            workflow_id=workflow_id,
+            execution_id=execution_id,
+            node_id=node.id,
+            node_name=node.name,
+            depth=depth,
+            status="running",
+        )
+
+        try:
+            child_context = context.create_child_context(
+                agent_id=node.id,
+                layer_timeout=node.timeout,
+            )
+        except (CycleDetectedError, MaxDepthExceededError) as e:
+            yield ExecutionEvent(
+                event_type=ExecutionEventType.NODE_ERROR,
+                timestamp=time.time(),
+                workflow_id=workflow_id,
+                execution_id=execution_id,
+                node_id=node.id,
+                node_name=node.name,
+                depth=depth,
+                error=str(e),
+            )
+            return
+
+        # Execute agent with streaming and emit thinking events
+        collected_content = []
+        tool_calls = []
+        tool_results = []
+
+        try:
+            async for update in self._invoke_agent_stream(node, child_context):
+                if update.delta_content:
+                    collected_content.append(update.delta_content)
+                    # Emit thinking event for streaming content
+                    yield ExecutionEvent(
+                        event_type=ExecutionEventType.NODE_THINKING,
+                        timestamp=time.time(),
+                        workflow_id=workflow_id,
+                        execution_id=execution_id,
+                        node_id=node.id,
+                        node_name=node.name,
+                        depth=depth,
+                        delta_content=update.delta_content,
+                    )
+
+                if update.tool_call:
+                    tool_calls.append(update.tool_call)
+                    # Emit tool call event
+                    yield ExecutionEvent(
+                        event_type=ExecutionEventType.NODE_TOOL_CALL,
+                        timestamp=time.time(),
+                        workflow_id=workflow_id,
+                        execution_id=execution_id,
+                        node_id=node.id,
+                        node_name=node.name,
+                        depth=depth,
+                        tool_call=update.tool_call,
+                    )
+
+                # Handle tool results from metadata
+                if update.metadata and "tool_result" in update.metadata:
+                    from .models import ToolResult
+                    tr_data = update.metadata["tool_result"]
+                    tr = ToolResult(
+                        tool_call_id=tr_data["tool_call_id"],
+                        content=tr_data["content"],
+                        is_error=tr_data.get("is_error", False),
+                    )
+                    tool_results.append(tr)
+                    yield ExecutionEvent(
+                        event_type=ExecutionEventType.NODE_TOOL_RESULT,
+                        timestamp=time.time(),
+                        workflow_id=workflow_id,
+                        execution_id=execution_id,
+                        node_id=node.id,
+                        node_name=node.name,
+                        depth=depth,
+                        tool_result=tr,
+                    )
+
+        except Exception as e:
+            yield ExecutionEvent(
+                event_type=ExecutionEventType.NODE_ERROR,
+                timestamp=time.time(),
+                workflow_id=workflow_id,
+                execution_id=execution_id,
+                node_id=node.id,
+                node_name=node.name,
+                depth=depth,
+                error=str(e),
+            )
+            return
+
+        # Build response
+        full_content = "".join(collected_content)
+        agent_response = AgentResponse(
+            messages=[ChatMessage(
+                role=MessageRole.ASSISTANT,
+                content=full_content,
+                name=node.name,
+            )],
+            tool_calls=tool_calls,
+            tool_results=tool_results,
+            response_id=str(uuid4()),
+        )
+        child_context.set_agent_output(node.id, agent_response)
+        child_context.add_messages(agent_response.messages)
+
+        # Emit node complete event
+        duration_ms = (time.time() - node_start_time) * 1000
+        yield ExecutionEvent(
+            event_type=ExecutionEventType.NODE_COMPLETE,
+            timestamp=time.time(),
+            workflow_id=workflow_id,
+            execution_id=execution_id,
+            node_id=node.id,
+            node_name=node.name,
+            depth=depth,
+            content=full_content,
+            duration_ms=duration_ms,
+            status="completed",
+        )
+
+        # If leaf node, we're done
+        if node.is_leaf:
+            return
+
+        # Route to children
+        children = self._get_routable_children(node, child_context, agent_response)
+        if children:
+            # Emit routing event
+            yield ExecutionEvent(
+                event_type=ExecutionEventType.ROUTING_START,
+                timestamp=time.time(),
+                workflow_id=workflow_id,
+                execution_id=execution_id,
+                node_id=node.id,
+                node_name=node.name,
+                depth=depth,
+                routing_strategy=node.routing_strategy.value,
+                target_nodes=[c.name for c in children],
+            )
+
+            # Execute children based on routing strategy
+            if node.routing_strategy == RoutingStrategy.PARALLEL:
+                # For parallel, we need to collect and interleave events
+                child_iterators = [
+                    self._execute_node_with_events(
+                        child, child_context, workflow_id, execution_id, depth + 1
+                    )
+                    for child in children
+                ]
+                # Simple sequential for now (proper parallel would need asyncio.gather with async generators)
+                for child_iter in child_iterators:
+                    async for event in child_iter:
+                        yield event
+            else:
+                # Sequential or other strategies
+                for child in children:
+                    async for event in self._execute_node_with_events(
+                        child, child_context, workflow_id, execution_id, depth + 1
+                    ):
+                        yield event
+
+            # For COORDINATOR pattern, run parent again to integrate
+            if node.routing_strategy == RoutingStrategy.COORDINATOR:
+                # Add integration prompt
+                integration_messages = [ChatMessage(
+                    role=MessageRole.SYSTEM,
+                    content=(
+                        "Below are the outputs from your specialist team members. "
+                        "Please integrate their inputs into a comprehensive, coherent response."
+                    ),
+                )]
+                for child in children:
+                    child_output = child_context.get_agent_output(child.id)
+                    if child_output and child_output.messages:
+                        specialist_output = "\n".join(m.content for m in child_output.messages if m.content)
+                        integration_messages.append(ChatMessage(
+                            role=MessageRole.USER,
+                            content=f"=== {child.name} 的输出 ===\n{specialist_output}",
+                        ))
+
+                for msg in integration_messages:
+                    child_context.add_message(msg)
+
+                # Re-invoke coordinator
+                yield ExecutionEvent(
+                    event_type=ExecutionEventType.NODE_START,
+                    timestamp=time.time(),
+                    workflow_id=workflow_id,
+                    execution_id=execution_id,
+                    node_id=node.id,
+                    node_name=f"{node.name} (Integration)",
+                    depth=depth,
+                    status="running",
+                    metadata={"phase": "integration"},
+                )
+
+                integration_start = time.time()
+                integration_content = []
+
+                async for update in self._invoke_agent_stream(node, child_context):
+                    if update.delta_content:
+                        integration_content.append(update.delta_content)
+                        yield ExecutionEvent(
+                            event_type=ExecutionEventType.NODE_THINKING,
+                            timestamp=time.time(),
+                            workflow_id=workflow_id,
+                            execution_id=execution_id,
+                            node_id=node.id,
+                            node_name=f"{node.name} (Integration)",
+                            depth=depth,
+                            delta_content=update.delta_content,
+                        )
+                    if update.tool_call:
+                        yield ExecutionEvent(
+                            event_type=ExecutionEventType.NODE_TOOL_CALL,
+                            timestamp=time.time(),
+                            workflow_id=workflow_id,
+                            execution_id=execution_id,
+                            node_id=node.id,
+                            node_name=f"{node.name} (Integration)",
+                            depth=depth,
+                            tool_call=update.tool_call,
+                        )
+                    # Handle tool results from metadata
+                    if update.metadata and "tool_result" in update.metadata:
+                        from .models import ToolResult
+                        tr_data = update.metadata["tool_result"]
+                        yield ExecutionEvent(
+                            event_type=ExecutionEventType.NODE_TOOL_RESULT,
+                            timestamp=time.time(),
+                            workflow_id=workflow_id,
+                            execution_id=execution_id,
+                            node_id=node.id,
+                            node_name=f"{node.name} (Integration)",
+                            depth=depth,
+                            tool_result=ToolResult(
+                                tool_call_id=tr_data["tool_call_id"],
+                                content=tr_data["content"],
+                                is_error=tr_data.get("is_error", False),
+                            ),
+                        )
+
+                integration_duration = (time.time() - integration_start) * 1000
+                yield ExecutionEvent(
+                    event_type=ExecutionEventType.NODE_COMPLETE,
+                    timestamp=time.time(),
+                    workflow_id=workflow_id,
+                    execution_id=execution_id,
+                    node_id=node.id,
+                    node_name=f"{node.name} (Integration)",
+                    depth=depth,
+                    content="".join(integration_content),
+                    duration_ms=integration_duration,
+                    status="completed",
+                    metadata={"phase": "integration"},
+                )
 
     async def _execute_node(
         self,

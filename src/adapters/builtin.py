@@ -298,52 +298,198 @@ class BuiltinAgentAdapter(AgentAdapter):
         context: ExecutionContext,
         **kwargs: Any,
     ) -> AsyncIterator[AgentResponseUpdate]:
-        """Execute with streaming."""
+        """Execute with streaming, including tool calling support."""
         self._ensure_initialized()
 
-        if self._openai_client is None or not (
-            self._definition and self._definition.streaming_enabled
-        ):
-            # Fall back to non-streaming
+        if self._openai_client is None:
             response = await self.run(messages, context, **kwargs)
             for msg in response.messages:
-                yield AgentResponseUpdate(
-                    delta_content=msg.content,
-                    is_complete=True,
-                )
+                if msg.content:
+                    yield AgentResponseUpdate(delta_content=msg.content, is_complete=False)
+            yield AgentResponseUpdate(delta_content="", is_complete=True)
             return
 
         full_messages = self._build_messages(messages, context, kwargs)
         openai_messages = self._convert_to_openai_messages(full_messages)
+        tools = self._get_tools_for_api()
+
+        model = self._definition.model if self._definition else "gpt-4"
+        temperature = self._definition.temperature if self._definition else 0.7
+        max_tokens = self._definition.max_tokens if self._definition else 4096
+
+        max_tool_rounds = 5
 
         try:
-            model = self._definition.model if self._definition else "gpt-4"
-            temperature = self._definition.temperature if self._definition else 0.7
-            max_tokens = self._definition.max_tokens if self._definition else 4096
+            for round_num in range(max_tool_rounds):
+                # Build request
+                request_kwargs = {
+                    "model": model,
+                    "messages": openai_messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "stream": True,
+                }
+                if tools:
+                    request_kwargs["tools"] = tools
+                    request_kwargs["tool_choice"] = "auto"
 
-            stream = await self._openai_client.chat.completions.create(
-                model=model,
-                messages=openai_messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=True,
-            )
+                # Stream the response
+                stream = await self._openai_client.chat.completions.create(**request_kwargs)
 
-            async for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
+                # Accumulate content and tool calls from stream
+                content_chunks = []
+                tool_calls_delta = {}  # id -> {name, arguments}
+
+                async for chunk in stream:
+                    if not chunk.choices:
+                        continue
+
+                    delta = chunk.choices[0].delta
+
+                    # Handle content
+                    if delta.content:
+                        content_chunks.append(delta.content)
+                        yield AgentResponseUpdate(
+                            delta_content=delta.content,
+                            is_complete=False,
+                        )
+
+                    # Handle tool calls (accumulated from deltas)
+                    if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                        for tc_delta in delta.tool_calls:
+                            tc_id = tc_delta.index
+                            if tc_id not in tool_calls_delta:
+                                tool_calls_delta[tc_id] = {
+                                    "id": "",
+                                    "name": "",
+                                    "arguments": "",
+                                }
+                            if tc_delta.id:
+                                tool_calls_delta[tc_id]["id"] = tc_delta.id
+                            if tc_delta.function:
+                                if tc_delta.function.name:
+                                    tool_calls_delta[tc_id]["name"] = tc_delta.function.name
+                                if tc_delta.function.arguments:
+                                    tool_calls_delta[tc_id]["arguments"] += tc_delta.function.arguments
+
+                # Check if we have tool calls to execute
+                if not tool_calls_delta:
+                    # No tool calls, we're done
+                    yield AgentResponseUpdate(delta_content="", is_complete=True)
+                    return
+
+                # Convert accumulated tool calls
+                from ..core.models import ToolCall, ToolResult
+                tool_calls = []
+                for tc_data in tool_calls_delta.values():
+                    try:
+                        arguments = json.loads(tc_data["arguments"]) if tc_data["arguments"] else {}
+                    except json.JSONDecodeError:
+                        arguments = {"raw": tc_data["arguments"]}
+
+                    tc = ToolCall(
+                        id=tc_data["id"],
+                        name=tc_data["name"],
+                        arguments=arguments,
+                    )
+                    tool_calls.append(tc)
+
+                    # Yield tool call event
                     yield AgentResponseUpdate(
-                        delta_content=chunk.choices[0].delta.content,
+                        delta_content="",
+                        tool_call=tc,
                         is_complete=False,
                     )
 
-            yield AgentResponseUpdate(
-                delta_content="",
-                is_complete=True,
-            )
+                # Execute tools
+                tool_results = []
+                for tool_call in tool_calls:
+                    # Check custom tools first
+                    tool_def = self._tools_registry.get(tool_call.name)
+                    if tool_def:
+                        result = await self._execute_tool(tool_def, tool_call.arguments)
+                        tool_results.append(ToolResult(
+                            tool_call_id=tool_call.id,
+                            content=result,
+                            is_error=False,
+                        ))
+                    # Then check system tools
+                    elif tool_call.name in self._enabled_system_tools:
+                        system_tool = self._system_tool_registry.get(tool_call.name)
+                        if system_tool:
+                            try:
+                                result = await system_tool.execute(**tool_call.arguments)
+                                tool_results.append(ToolResult(
+                                    tool_call_id=tool_call.id,
+                                    content=result,
+                                    is_error=False,
+                                ))
+                            except Exception as e:
+                                logger.error(f"System tool execution error: {e}")
+                                tool_results.append(ToolResult(
+                                    tool_call_id=tool_call.id,
+                                    content=f"Error: {str(e)}",
+                                    is_error=True,
+                                ))
+                        else:
+                            tool_results.append(ToolResult(
+                                tool_call_id=tool_call.id,
+                                content=f"System tool not found: {tool_call.name}",
+                                is_error=True,
+                            ))
+                    else:
+                        tool_results.append(ToolResult(
+                            tool_call_id=tool_call.id,
+                            content=f"Unknown tool: {tool_call.name}",
+                            is_error=True,
+                        ))
+
+                    # Yield tool result for visibility
+                    yield AgentResponseUpdate(
+                        delta_content="",
+                        is_complete=False,
+                        metadata={"tool_result": {
+                            "tool_call_id": tool_results[-1].tool_call_id,
+                            "content": tool_results[-1].content[:500],  # Truncate for UI
+                            "is_error": tool_results[-1].is_error,
+                        }},
+                    )
+
+                # Append assistant message with tool calls to conversation
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": "".join(content_chunks) if content_chunks else None,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                            },
+                        }
+                        for tc in tool_calls
+                    ],
+                }
+                openai_messages.append(assistant_msg)
+
+                # Append tool results
+                for tool_result in tool_results:
+                    openai_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_result.tool_call_id,
+                        "content": tool_result.content,
+                    })
+
+                logger.info(f"Stream tool round {round_num + 1}: executed {len(tool_calls)} tool(s), continuing...")
+
+            # If we reach here, we hit max rounds
+            yield AgentResponseUpdate(delta_content="", is_complete=True)
 
         except Exception as e:
+            logger.error(f"Error in streaming execution: {e}")
             yield AgentResponseUpdate(
-                delta_content=f"Error: {str(e)}",
+                delta_content=f"\n\nError: {str(e)}",
                 is_complete=True,
             )
 

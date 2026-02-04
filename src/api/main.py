@@ -9,6 +9,7 @@ Provides REST API for:
 """
 
 import logging
+import json
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -271,24 +272,29 @@ def create_app() -> FastAPI:
 
         return {"status": "deleted", "id": workflow_id}
 
-    @app.post("/api/workflows/{workflow_id}/run", response_model=ExecutionResponse)
+    @app.post("/api/workflows/{workflow_id}/run")
     async def run_workflow(workflow_id: str, request: RunWorkflowRequest):
         """Run a workflow."""
         manager = get_workflow_manager()
 
         if request.stream:
-            # Return streaming response
+            # Return ExecutionEvent SSE stream
             async def generate():
-                async for update in manager.run_workflow_stream(
+                async for event in manager.run_workflow_stream_events(
                     workflow_id, request.message
                 ):
-                    yield f"data: {update.delta_content}\n\n"
-                    if update.is_complete:
-                        yield "data: [DONE]\n\n"
+                    event_data = event.model_dump(exclude_none=True)
+                    yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
 
             return StreamingResponse(
                 generate(),
                 media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
             )
 
         result = await manager.run_workflow(workflow_id, request.message)

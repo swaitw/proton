@@ -419,6 +419,43 @@ class AgentResponseUpdate(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+# ============== Execution Event Types ==============
+
+class ExecutionEventType(str, Enum):
+    """Types of events emitted during workflow execution."""
+    WORKFLOW_START = "workflow_start"
+    WORKFLOW_COMPLETE = "workflow_complete"
+    WORKFLOW_ERROR = "workflow_error"
+    NODE_START = "node_start"
+    NODE_THINKING = "node_thinking"
+    NODE_TOOL_CALL = "node_tool_call"
+    NODE_TOOL_RESULT = "node_tool_result"
+    NODE_COMPLETE = "node_complete"
+    NODE_ERROR = "node_error"
+    ROUTING_START = "routing_start"
+
+
+class ExecutionEvent(BaseModel):
+    """Event emitted during workflow execution for real-time visualization."""
+    event_type: ExecutionEventType
+    timestamp: float
+    workflow_id: str
+    execution_id: str
+    node_id: Optional[str] = None
+    node_name: Optional[str] = None
+    depth: int = 0
+    content: Optional[str] = None
+    delta_content: Optional[str] = None
+    tool_call: Optional[ToolCall] = None
+    tool_result: Optional[ToolResult] = None
+    routing_strategy: Optional[str] = None
+    target_nodes: Optional[List[str]] = None
+    status: Optional[str] = None
+    error: Optional[str] = None
+    duration_ms: Optional[float] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 # ============== Workflow Configuration ==============
 
 class WorkflowConfig(BaseModel):

@@ -166,6 +166,51 @@ export interface SystemToolsResponse {
   categories: string[];
 }
 
+// Execution Event types for workflow visualization
+export type ExecutionEventType =
+  | 'workflow_start'
+  | 'workflow_complete'
+  | 'workflow_error'
+  | 'node_start'
+  | 'node_thinking'
+  | 'node_tool_call'
+  | 'node_tool_result'
+  | 'node_complete'
+  | 'node_error'
+  | 'routing_start';
+
+export interface ToolCallData {
+  id: string;
+  name: string;
+  arguments: Record<string, any>;
+}
+
+export interface ToolResultData {
+  tool_call_id: string;
+  content: string;
+  is_error: boolean;
+}
+
+export interface ExecutionEvent {
+  event_type: ExecutionEventType;
+  timestamp: number;
+  workflow_id: string;
+  execution_id: string;
+  node_id?: string;
+  node_name?: string;
+  depth?: number;
+  content?: string;
+  delta_content?: string;
+  tool_call?: ToolCallData;
+  tool_result?: ToolResultData;
+  routing_strategy?: string;
+  target_nodes?: string[];
+  status?: string;
+  error?: string;
+  duration_ms?: number;
+  metadata?: Record<string, any>;
+}
+
 export interface TestAgentResult {
   response?: string;
   error?: string;
@@ -200,6 +245,78 @@ export const api = {
       stream: false,
     });
     return response.data;
+  },
+
+  /**
+   * Run a workflow with streaming execution events via SSE.
+   * Returns an abort function to cancel the request.
+   */
+  runWorkflowStream(
+    workflowId: string,
+    message: string,
+    onEvent: (event: ExecutionEvent) => void,
+    onError?: (error: Error) => void,
+    onComplete?: () => void,
+  ): () => void {
+    const abortController = new AbortController();
+
+    const run = async () => {
+      try {
+        const response = await fetch(`${BASE_URL}/api/workflows/${workflowId}/run`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, stream: true }),
+          signal: abortController.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) {
+          throw new Error('ReadableStream not supported');
+        }
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data: ')) continue;
+
+            const data = trimmed.slice(6);
+            if (data === '[DONE]') {
+              onComplete?.();
+              return;
+            }
+
+            try {
+              const event: ExecutionEvent = JSON.parse(data);
+              onEvent(event);
+            } catch {
+              // Skip malformed JSON lines
+            }
+          }
+        }
+
+        onComplete?.();
+      } catch (err: any) {
+        if (err.name === 'AbortError') return;
+        onError?.(err);
+      }
+    };
+
+    run();
+    return () => abortController.abort();
   },
 
   // Agents

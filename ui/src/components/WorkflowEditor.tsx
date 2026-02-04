@@ -14,6 +14,7 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import AgentNode from './AgentNode';
 import AgentEditor from './AgentEditor';
+import ExecutionPanel from './ExecutionPanel';
 import { api, AgentTemplate } from '../api/client';
 import styles from './WorkflowEditor.module.css';
 import listStyles from './WorkflowList.module.css'; // Re-use styles
@@ -65,6 +66,9 @@ const WorkflowEditor: React.FC<WorkflowEditorProps> = ({ workflowId, onWorkflowC
   const [editorVisible, setEditorVisible] = useState(false);
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [editingAgentType, setEditingAgentType] = useState<string>('builtin');
+
+  // Execution Panel state
+  const [executionPanelVisible, setExecutionPanelVisible] = useState(false);
 
   const [templates, setTemplates] = useState<AgentTemplate[]>([]);
 
@@ -233,14 +237,8 @@ const WorkflowEditor: React.FC<WorkflowEditorProps> = ({ workflowId, onWorkflowC
       alert('Please save the workflow first');
       return;
     }
-    const input = prompt('Enter your message:');
-    if (!input) return;
-    try {
-      const result = await api.runWorkflow(currentWorkflowId, input);
-      alert(`Workflow completed: ${result.state}\n\nOutput:\n${result.output}`);
-    } catch (error) {
-      alert('Failed to run workflow');
-    }
+    // Open the ExecutionPanel instead of using prompt/alert
+    setExecutionPanelVisible(true);
   };
 
   // handleEditAgent is now stable via useCallback, so no need for currentWorkflowId dependency
@@ -471,6 +469,13 @@ const WorkflowEditor: React.FC<WorkflowEditorProps> = ({ workflowId, onWorkflowC
         agentType={editingAgentType}
         onClose={() => setEditorVisible(false)}
         onSave={() => currentWorkflowId && loadWorkflow(currentWorkflowId)}
+      />
+
+      <ExecutionPanel
+        visible={executionPanelVisible}
+        workflowId={currentWorkflowId}
+        workflowName={workflowName}
+        onClose={() => setExecutionPanelVisible(false)}
       />
     </div>
   );

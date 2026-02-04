@@ -45,3 +45,5 @@ ui/.env
 .DS_Store
 .claude/
 .gemini/
+output/
+data/proton.db

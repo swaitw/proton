@@ -21,6 +21,8 @@ from ..core.models import (
     ChatMessage,
     MessageRole,
     WorkflowConfig,
+    ExecutionEvent,
+    ExecutionEventType,
 )
 from ..core.agent_node import AgentNode, AgentTree
 from ..core.context import ExecutionContext
@@ -145,8 +147,9 @@ class Workflow:
         Returns:
             WorkflowResult with execution details
         """
-        if self.state != WorkflowState.READY:
-            if self.state == WorkflowState.CREATED:
+        # Check if we need to initialize (state not ready, or executor is None)
+        if self.state != WorkflowState.READY or self.executor is None:
+            if self.state in (WorkflowState.CREATED, WorkflowState.READY):
                 await self.initialize()
             else:
                 raise RuntimeError(f"Workflow not ready, state: {self.state}")
@@ -205,8 +208,9 @@ class Workflow:
         context: Optional[ExecutionContext] = None,
     ) -> AsyncIterator[AgentResponseUpdate]:
         """Execute the workflow with streaming output."""
-        if self.state != WorkflowState.READY:
-            if self.state == WorkflowState.CREATED:
+        # Check if we need to initialize (state not ready, or executor is None)
+        if self.state != WorkflowState.READY or self.executor is None:
+            if self.state in (WorkflowState.CREATED, WorkflowState.READY):
                 await self.initialize()
             else:
                 yield AgentResponseUpdate(
@@ -224,6 +228,50 @@ class Workflow:
             yield AgentResponseUpdate(
                 delta_content=f"Error: {e}",
                 is_complete=True,
+            )
+        finally:
+            self.state = WorkflowState.READY
+
+    async def run_stream_with_events(
+        self,
+        input_message: str,
+        context: Optional[ExecutionContext] = None,
+    ) -> AsyncIterator[ExecutionEvent]:
+        """Execute the workflow yielding detailed execution events."""
+        import time
+
+        # Check if we need to initialize (state not ready, or executor is None)
+        if self.state != WorkflowState.READY or self.executor is None:
+            if self.state in (WorkflowState.CREATED, WorkflowState.READY):
+                await self.initialize()
+            else:
+                yield ExecutionEvent(
+                    event_type=ExecutionEventType.WORKFLOW_ERROR,
+                    timestamp=time.time(),
+                    workflow_id=self.id,
+                    execution_id="",
+                    error=f"Workflow not ready: {self.state}",
+                )
+                return
+
+        execution_id = str(uuid4())
+        self.state = WorkflowState.RUNNING
+
+        try:
+            async for event in self.executor.run_stream_with_events(
+                input_message=input_message,
+                workflow_id=self.id,
+                execution_id=execution_id,
+                context=context,
+            ):
+                yield event
+        except Exception as e:
+            yield ExecutionEvent(
+                event_type=ExecutionEventType.WORKFLOW_ERROR,
+                timestamp=time.time(),
+                workflow_id=self.id,
+                execution_id=execution_id,
+                error=str(e),
             )
         finally:
             self.state = WorkflowState.READY
@@ -536,6 +584,28 @@ class WorkflowManager:
 
         async for update in workflow.run_stream(input_message):
             yield update
+
+    async def run_workflow_stream_events(
+        self,
+        workflow_id: str,
+        input_message: str,
+    ) -> AsyncIterator[ExecutionEvent]:
+        """Execute a workflow yielding detailed execution events."""
+        import time
+
+        workflow = self._workflows.get(workflow_id)
+        if not workflow:
+            yield ExecutionEvent(
+                event_type=ExecutionEventType.WORKFLOW_ERROR,
+                timestamp=time.time(),
+                workflow_id=workflow_id,
+                execution_id="",
+                error="Workflow not found",
+            )
+            return
+
+        async for event in workflow.run_stream_with_events(input_message):
+            yield event
 
 
 # Global workflow manager instance

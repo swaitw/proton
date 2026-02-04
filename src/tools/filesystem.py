@@ -4,6 +4,7 @@ File system tools: read, write, list, edit files.
 
 import os
 import logging
+import tempfile
 from pathlib import Path
 from typing import Any, List
 
@@ -15,11 +16,56 @@ logger = logging.getLogger(__name__)
 # Default workspace directory
 DEFAULT_WORKSPACE = os.environ.get("PROTON_WORKSPACE", os.path.expanduser("~/.proton/workspace"))
 
+# Resolved workspace (may change at runtime if default is not writable)
+_resolved_workspace: str | None = None
+
+
+def _get_workspace() -> Path:
+    """Get the writable workspace directory, with fallback."""
+    global _resolved_workspace
+
+    if _resolved_workspace:
+        return Path(_resolved_workspace)
+
+    # Try configured workspace
+    workspace = Path(DEFAULT_WORKSPACE)
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        # Test if writable
+        test_file = workspace / ".write_test"
+        test_file.write_text("test")
+        test_file.unlink()
+        _resolved_workspace = str(workspace)
+        logger.info(f"Using workspace: {workspace}")
+        return workspace
+    except (OSError, PermissionError) as e:
+        logger.warning(f"Default workspace not writable ({e}), trying fallback...")
+
+    # Fallback: project-relative output directory
+    project_root = Path(__file__).parent.parent.parent
+    fallback = project_root / "output"
+    try:
+        fallback.mkdir(parents=True, exist_ok=True)
+        test_file = fallback / ".write_test"
+        test_file.write_text("test")
+        test_file.unlink()
+        _resolved_workspace = str(fallback)
+        logger.info(f"Using fallback workspace: {fallback}")
+        return fallback
+    except (OSError, PermissionError):
+        pass
+
+    # Last resort: temp directory
+    fallback_tmp = Path(tempfile.gettempdir()) / "proton-workspace"
+    fallback_tmp.mkdir(parents=True, exist_ok=True)
+    _resolved_workspace = str(fallback_tmp)
+    logger.info(f"Using temp workspace: {fallback_tmp}")
+    return fallback_tmp
+
 
 def _ensure_workspace(filepath: str) -> Path:
     """Ensure file path is within workspace and return absolute path."""
-    workspace = Path(DEFAULT_WORKSPACE)
-    workspace.mkdir(parents=True, exist_ok=True)
+    workspace = _get_workspace()
 
     # Resolve the path
     if os.path.isabs(filepath):
@@ -31,7 +77,7 @@ def _ensure_workspace(filepath: str) -> Path:
     try:
         path.resolve().relative_to(workspace.resolve())
     except ValueError:
-        raise PermissionError(f"Access denied: {filepath} is outside workspace")
+        raise PermissionError(f"Access denied: {filepath} is outside workspace ({workspace})")
 
     return path
 
@@ -105,7 +151,7 @@ class FileWriteTool(SystemTool):
             "Write content to a file in the workspace directory. "
             "Creates the file if it doesn't exist, or overwrites if it does. "
             "IMPORTANT: Use relative paths only (e.g., 'travel_plan.md' or 'docs/report.md'). "
-            f"Files will be saved in the workspace: {DEFAULT_WORKSPACE}"
+            "The file will be saved in the workspace directory."
         )
 
     @property
@@ -154,10 +200,19 @@ class FileWriteTool(SystemTool):
         try:
             path = _ensure_workspace(filepath)
             path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Log for debugging
+            logger.info(f"Writing file to: {path.resolve()}")
+            logger.info(f"Content length: {len(content)} characters")
+
             path.write_text(content, encoding=encoding)
             return f"Successfully wrote {len(content)} characters to file.\nFull path: {path.resolve()}"
         except PermissionError as e:
-            return f"Error: {e}"
+            logger.error(f"Permission error writing file {filepath}: {e}")
+            return f"Error: Permission denied - {e}"
+        except OSError as e:
+            logger.error(f"OS error writing file {filepath}: {e}")
+            return f"Error writing file (OS error {e.errno}): {e}"
         except Exception as e:
             logger.error(f"Error writing file: {e}")
             return f"Error writing file: {e}"
