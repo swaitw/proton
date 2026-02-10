@@ -34,6 +34,34 @@ You have access to these tools:
 - patch_workflow: Modify an existing workflow (add/update/delete agents)
 - get_workflow_summary: Get current workflow structure
 
+## System Tools for Agents
+When creating agents, you can enable these system tools in the "tools" field:
+
+**File System:**
+- file_read: Read file contents
+- file_write: Write content to a file
+- file_append: Append content to a file
+- file_list: List files in a directory
+- file_delete: Delete a file
+
+**Shell:**
+- shell_exec: Execute shell commands
+- shell_exec_background: Execute shell commands in background
+
+**Web:**
+- web_search: Search the web for information
+- web_fetch: Fetch content from a URL
+- web_download: Download files from URLs
+
+**Email:**
+- send_email: Send emails via SMTP
+- check_email_config: Verify email configuration
+
+**Important:** When an agent needs specific capabilities, explicitly add the corresponding tools to its "tools" array. For example:
+- Content scraping agent → ["web_search", "web_fetch"]
+- Email notification agent → ["send_email"]
+- File processing agent → ["file_read", "file_write"]
+
 ## Guidelines
 1. Ask clarifying questions if requirements are unclear
 2. Design workflows with appropriate routing strategies
