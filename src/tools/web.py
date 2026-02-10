@@ -300,8 +300,9 @@ class SearXNGProvider(SearchProvider):
         }
 
         try:
+            ssl_context = _get_ssl_context()
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=30) as resp:
+                async with session.get(url, params=params, timeout=30, ssl=ssl_context) as resp:
                     if resp.status != 200:
                         return f"Error: SearXNG returned status {resp.status}"
 
@@ -366,8 +367,9 @@ class SerperProvider(SearchProvider):
         }
 
         try:
+            ssl_context = _get_ssl_context()
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+                async with session.post(url, headers=headers, json=payload, timeout=30, ssl=ssl_context) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
                         return f"Error: Serper API returned status {resp.status}: {error_text}"
@@ -436,8 +438,9 @@ class BraveProvider(SearchProvider):
         }
 
         try:
+            ssl_context = _get_ssl_context()
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, params=params, timeout=30) as resp:
+                async with session.get(url, headers=headers, params=params, timeout=30, ssl=ssl_context) as resp:
                     if resp.status != 200:
                         return f"Error: Brave API returned status {resp.status}"
 
@@ -503,8 +506,9 @@ class BingProvider(SearchProvider):
         }
 
         try:
+            ssl_context = _get_ssl_context()
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, params=params, timeout=30) as resp:
+                async with session.get(url, headers=headers, params=params, timeout=30, ssl=ssl_context) as resp:
                     if resp.status != 200:
                         return f"Error: Bing API returned status {resp.status}"
 
@@ -545,8 +549,9 @@ class BingProvider(SearchProvider):
         }
 
         try:
+            ssl_context = _get_ssl_context()
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, params=params, timeout=30) as resp:
+                async with session.get(url, headers=headers, params=params, timeout=30, ssl=ssl_context) as resp:
                     if resp.status != 200:
                         return f"Error: Bing returned status {resp.status}"
 
@@ -644,8 +649,9 @@ class GoogleProvider(SearchProvider):
         }
 
         try:
+            ssl_context = _get_ssl_context()
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, timeout=30) as resp:
+                async with session.get(url, params=params, timeout=30, ssl=ssl_context) as resp:
                     if resp.status != 200:
                         return f"Error: Google API returned status {resp.status}"
 
@@ -696,8 +702,9 @@ class DuckDuckGoProvider(SearchProvider):
         }
 
         try:
+            ssl_context = _get_ssl_context()
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, data=data, timeout=30) as resp:
+                async with session.post(url, headers=headers, data=data, timeout=30, ssl=ssl_context) as resp:
                     if resp.status != 200:
                         return f"Error: DuckDuckGo returned status {resp.status}"
 
@@ -742,6 +749,21 @@ class DuckDuckGoProvider(SearchProvider):
         except Exception as e:
             logger.error(f"DuckDuckGo search error: {e}")
             return f"Error: DuckDuckGo search failed: {e}"
+
+
+# ============== Helper Functions ==============
+
+def _get_ssl_context():
+    """Get SSL context based on environment."""
+    import ssl
+    import os
+    
+    if os.environ.get("FLASK_ENV") == "development" or os.environ.get("DEBUG") == "True":
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        return ssl_context
+    return None
 
 
 # ============== Provider Registry ==============
@@ -967,8 +989,9 @@ class WebFetchTool(SystemTool):
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             }
 
+            ssl_context = _get_ssl_context()
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=30, allow_redirects=True) as resp:
+                async with session.get(url, headers=headers, timeout=30, allow_redirects=True, ssl=ssl_context) as resp:
                     if resp.status != 200:
                         return f"Error: HTTP {resp.status} - {resp.reason}"
 
@@ -1056,8 +1079,9 @@ class WebDownloadTool(SystemTool):
                 "User-Agent": "Mozilla/5.0 (compatible; ProtonBot/1.0)",
             }
 
+            ssl_context = _get_ssl_context()
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=120) as resp:
+                async with session.get(url, headers=headers, timeout=120, ssl=ssl_context) as resp:
                     if resp.status != 200:
                         return f"Error: HTTP {resp.status} - {resp.reason}"
 
