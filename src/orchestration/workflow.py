@@ -747,6 +747,36 @@ class WorkflowManager:
 
         return None
 
+    def get_workflow_copilot_config(self, workflow_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get Copilot configuration for a specific workflow.
+
+        Args:
+            workflow_id: The workflow ID
+
+        Returns:
+            Workflow-specific copilot config dict, or None if not set
+        """
+        # For now, return None since we don't have workflow-level configs yet
+        # This will fall back to global config in the API
+        return None
+
+    async def set_workflow_copilot_config(
+        self,
+        workflow_id: str,
+        config: Dict[str, Any]
+    ) -> None:
+        """
+        Set Copilot configuration for a specific workflow.
+
+        Args:
+            workflow_id: The workflow ID
+            config: Config dict with provider, model, api_key, base_url
+        """
+        # For now, this is a placeholder
+        # In the future, we can store this in the workflow metadata or storage
+        pass
+
 
 # Global workflow manager instance
 _global_manager: Optional[WorkflowManager] = None

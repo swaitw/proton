@@ -339,6 +339,33 @@ class CopilotService:
             "providers": list(PROVIDER_DEFAULTS.keys()),
         }
 
+    def format_config(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Format a workflow-specific config dict into the same format as get_config().
+
+        Args:
+            config_dict: Raw config dict with provider, model, api_key, base_url
+
+        Returns:
+            Formatted config dict with api_key_configured, available_models, etc.
+        """
+        provider = config_dict.get("provider", "openai")
+        model = config_dict.get("model", "gpt-4")
+        api_key = config_dict.get("api_key")
+        base_url = config_dict.get("base_url")
+
+        provider_config = PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS["openai"])
+
+        return {
+            "provider": provider,
+            "model": model,
+            "base_url": base_url,
+            "api_key_configured": bool(api_key),
+            "api_key_preview": f"{api_key[:8]}..." if api_key and len(api_key) > 8 else None,
+            "available_models": provider_config.get("models", []),
+            "providers": list(PROVIDER_DEFAULTS.keys()),
+        }
+
     async def create_session(
         self,
         metadata: Optional[Dict] = None
