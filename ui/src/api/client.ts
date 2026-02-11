@@ -550,6 +550,43 @@ export const api = {
     return response.data;
   },
 
+  // Skill management endpoints
+  async uploadSkill(file: File): Promise<any> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await client.post('/api/skills/upload', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    return response.data;
+  },
+
+  async listSkills(): Promise<any[]> {
+    const response = await client.get('/api/skills');
+    return response.data;
+  },
+
+  async bindSkillToAgent(skillId: string, agentId: string): Promise<any> {
+    const response = await client.post(`/api/skills/${skillId}/bind/${agentId}`);
+    return response.data;
+  },
+
+  async unbindSkillFromAgent(skillId: string, agentId: string): Promise<any> {
+    const response = await client.post(`/api/skills/${skillId}/unbind/${agentId}`);
+    return response.data;
+  },
+
+  async getAgentSkills(agentId: string): Promise<any[]> {
+    const response = await client.get(`/api/agents/${agentId}/skills`);
+    return response.data;
+  },
+
+  async uninstallSkill(skillId: string): Promise<any> {
+    const response = await client.delete(`/api/skills/${skillId}`);
+    return response.data;
+  },
+
   async removePlugin(id: string): Promise<void> {
     await client.delete(`/api/plugins/${id}`);
   },

@@ -69,6 +69,32 @@ class SkillConfig(BaseModel):
     approval_required: bool = False
 
 
+class SkillPackageMetadata(BaseModel):
+    """Metadata from SKILL.md file."""
+    name: str
+    description: str
+    version: str = "1.0.0"
+    author: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    entry_point: str = "skill.py"           # Main skill file
+    function_name: str = "execute"          # Main function
+    parameters_schema: Optional[Dict[str, Any]] = None
+    approval_required: bool = False
+    dependencies: List[str] = Field(default_factory=list)
+    icon: Optional[str] = None              # Icon URL or emoji
+
+
+class InstalledSkill(BaseModel):
+    """Represents an installed skill package."""
+    id: str                                 # Unique skill ID
+    metadata: SkillPackageMetadata
+    package_path: str                       # Path to extracted skill files
+    installed_at: datetime = Field(default_factory=datetime.now)
+    enabled: bool = True
+    # Runtime info
+    agent_ids: List[str] = Field(default_factory=list)  # Agents using this skill
+
+
 # ============== Built-in Tool Definitions ==============
 
 class ToolParameterType(str, Enum):

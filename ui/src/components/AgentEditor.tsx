@@ -76,6 +76,12 @@ const AgentEditor: React.FC<AgentEditorProps> = ({ visible, workflowId, agentId,
   const [pluginForm, setPluginForm] = useState<any>({});
   const [plugins, setPlugins] = useState<Plugin[]>([]);
 
+  // Skill upload states
+  const [skillUploadModalVisible, setSkillUploadModalVisible] = useState(false);
+  const [skillUploadLoading, setSkillUploadLoading] = useState(false);
+  const [agentSkills, setAgentSkills] = useState<any[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+
   // System tools state
   const [systemTools, setSystemTools] = useState<Record<string, SystemTool[]>>({});
   const [systemToolCategories, setSystemToolCategories] = useState<string[]>([]);
@@ -89,14 +95,31 @@ const AgentEditor: React.FC<AgentEditorProps> = ({ visible, workflowId, agentId,
     required: false,
   });
 
+  // Load agent skills
+  const loadAgentSkills = async () => {
+    if (!agentId) return;
+    setSkillsLoading(true);
+    try {
+      const skills = await api.getAgentSkills(agentId);
+      setAgentSkills(skills);
+    } catch (error) {
+      console.error('Failed to load agent skills:', error);
+    } finally {
+      setSkillsLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (visible && workflowId && agentId && agentType === 'builtin') {
       loadDefinition();
       loadPlugins();
       loadSystemTools();
+      loadAgentSkills();
     } else if (visible) {
       setDefinition(null);
       setFormData({});
+      setPlugins([]);
+      setAgentSkills([]);
     }
   }, [visible, workflowId, agentId, agentType]);
 
@@ -310,6 +333,48 @@ const AgentEditor: React.FC<AgentEditorProps> = ({ visible, workflowId, agentId,
       alert('Plugin registered successfully');
     } catch (error) {
       alert('Failed to register plugin');
+    }
+  };
+
+  // Skill upload handlers
+  const handleSkillUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    setSkillUploadLoading(true);
+    try {
+      const result = await api.uploadSkill(files[0]);
+      setSkillUploadModalVisible(false);
+      alert('技能上传成功！');
+      
+      // Auto-bind the skill to current agent
+      if (agentId) {
+        await api.bindSkillToAgent(result.skill_id, agentId);
+        loadAgentSkills();
+        alert('技能已自动绑定到当前Agent！');
+      }
+    } catch (error) {
+      console.error('Failed to upload skill:', error);
+      alert('技能上传失败，请检查文件格式是否正确');
+    } finally {
+      setSkillUploadLoading(false);
+      // Reset file input
+      event.target.value = '';
+    }
+  };
+
+  const handleUnbindSkill = async (skillId: string) => {
+    if (!agentId) return;
+    
+    if (!confirm('确定要解绑这个技能吗？')) return;
+    
+    try {
+      await api.unbindSkillFromAgent(skillId, agentId);
+      loadAgentSkills();
+      alert('技能解绑成功');
+    } catch (error) {
+      console.error('Failed to unbind skill:', error);
+      alert('技能解绑失败');
     }
   };
 
@@ -780,27 +845,58 @@ const AgentEditor: React.FC<AgentEditorProps> = ({ visible, workflowId, agentId,
                 <div className={styles.formSection}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                     <h4 style={{ margin: 0 }}>技能</h4>
-                    <button type="button" className={listStyles.button} onClick={() => handleAddPlugin('skill')}>+ 添加技能</button>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <button type="button" className={listStyles.button} onClick={() => handleAddPlugin('skill')}>+ 手动配置</button>
+                      <button type="button" className={listStyles.button} onClick={() => setSkillUploadModalVisible(true)}>+ 上传技能包</button>
+                    </div>
                   </div>
 
-                  {plugins.filter(p => p.type === 'skill').length === 0 ? (
-                    <p style={{ color: '#888' }}>暂无配置的技能</p>
-                  ) : (
-                    plugins.filter(p => p.type === 'skill').map((plugin) => (
-                      <div key={plugin.id} className={styles.toolCard}>
-                        <div className={styles.toolHeader}>
-                          <div className={styles.toolTitle}>
-                            <span>{plugin.name}</span>
-                            <span style={{ fontSize: '0.75rem', padding: '2px 8px', background: '#553c9a', borderRadius: '4px' }}>Skill</span>
+                  {/* Uploaded Skills Section */}
+                  <div style={{ marginBottom: '20px' }}>
+                    <h5 style={{ margin: '0 0 12px 0', fontSize: '0.9rem' }}>已绑定的技能包</h5>
+                    {skillsLoading ? (
+                      <p style={{ color: '#888' }}>加载中...</p>
+                    ) : agentSkills.length === 0 ? (
+                      <p style={{ color: '#888' }}>暂无绑定的技能包</p>
+                    ) : (
+                      agentSkills.map((skill) => (
+                        <div key={skill.id} className={styles.toolCard}>
+                          <div className={styles.toolHeader}>
+                            <div className={styles.toolTitle}>
+                              <span>{skill.name}</span>
+                              <span style={{ fontSize: '0.75rem', padding: '2px 8px', background: '#3182ce', borderRadius: '4px' }}>Skill Package</span>
+                            </div>
+                            <button type="button" className={listStyles.buttonLink} style={{ color: '#f56565' }} onClick={() => handleUnbindSkill(skill.id)}>解绑</button>
                           </div>
-                          <button type="button" className={listStyles.buttonLink} style={{ color: '#f56565' }} onClick={() => handleDeletePlugin(plugin.id)}>删除</button>
+                          <p className={styles.toolDescription}>{skill.description}</p>
+                          <p style={{ fontSize: '0.75rem', color: '#666' }}>版本: {skill.version} | 安装时间: {new Date(skill.installed_at).toLocaleString()}</p>
                         </div>
-                        {plugin.tools && plugin.tools.length > 0 && (
-                          <p className={styles.toolDescription}>函数: {plugin.tools.join(', ')}</p>
-                        )}
-                      </div>
-                    ))
-                  )}
+                      ))
+                    )}
+                  </div>
+
+                  {/* Manual Skills Section */}
+                  <div>
+                    <h5 style={{ margin: '0 0 12px 0', fontSize: '0.9rem' }}>手动配置的技能</h5>
+                    {plugins.filter(p => p.type === 'skill').length === 0 ? (
+                      <p style={{ color: '#888' }}>暂无手动配置的技能</p>
+                    ) : (
+                      plugins.filter(p => p.type === 'skill').map((plugin) => (
+                        <div key={plugin.id} className={styles.toolCard}>
+                          <div className={styles.toolHeader}>
+                            <div className={styles.toolTitle}>
+                              <span>{plugin.name}</span>
+                              <span style={{ fontSize: '0.75rem', padding: '2px 8px', background: '#553c9a', borderRadius: '4px' }}>Skill</span>
+                            </div>
+                            <button type="button" className={listStyles.buttonLink} style={{ color: '#f56565' }} onClick={() => handleDeletePlugin(plugin.id)}>删除</button>
+                          </div>
+                          {plugin.tools && plugin.tools.length > 0 && (
+                            <p className={styles.toolDescription}>函数: {plugin.tools.join(', ')}</p>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
 
                 <hr className={styles.divider} />
@@ -1525,6 +1621,36 @@ const AgentEditor: React.FC<AgentEditorProps> = ({ visible, workflowId, agentId,
             注册
           </button>
         </div>
+      </Modal>
+
+      {/* Skill Upload Modal */}
+      <Modal isOpen={skillUploadModalVisible} onClose={() => setSkillUploadModalVisible(false)} title="上传技能包">
+        <div className={listStyles.formGroup}>
+          <label className={listStyles.formLabel}>选择技能包文件</label>
+          <input
+            type="file"
+            accept=".zip,.skill"
+            onChange={handleSkillUpload}
+            disabled={skillUploadLoading}
+            style={{ marginTop: '8px' }}
+          />
+          <p style={{ color: '#888', fontSize: '0.75rem', marginTop: '8px' }}>
+            支持 .zip 或 .skill 文件格式，文件中需包含根目录的 SKILL.md 文件
+          </p>
+        </div>
+        <div className={listStyles.formGroup}>
+          <label className={listStyles.formLabel}>文件要求</label>
+          <ul style={{ color: '#666', fontSize: '0.75rem', margin: '8px 0 0 0' }}>
+            <li>文件必须包含根目录的 SKILL.md 文件</li>
+            <li>SKILL.md 文件需包含 YAML 格式的技能信息</li>
+            <li>支持的文件格式：.zip, .skill</li>
+          </ul>
+        </div>
+        {skillUploadLoading && (
+          <div style={{ textAlign: 'center', padding: '16px' }}>
+            <p>上传中，请稍候...</p>
+          </div>
+        )}
       </Modal>
     </>
   );

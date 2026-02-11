@@ -34,6 +34,7 @@ from ..core.models import (
     PromptVariable,
     OutputFormat,
     AgentTemplate,
+    InstalledSkill,
 )
 from ..core.agent_node import AgentNode
 from ..orchestration.workflow import (
@@ -44,6 +45,8 @@ from ..orchestration.workflow import (
     get_workflow_manager,
 )
 from ..plugins.registry import get_plugin_registry
+from ..plugins.skill_manager import get_skill_manager
+from fastapi import UploadFile, File
 
 logger = logging.getLogger(__name__)
 
@@ -557,6 +560,113 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Plugin not found")
 
         return {"status": "removed", "id": plugin_id}
+
+    # ============== Skill Management Endpoints ==============
+
+    @app.post("/api/skills/upload")
+    async def upload_skill(file: UploadFile = File(...)):
+        """Upload and install a skill package (.zip or .skill file)."""
+        import tempfile
+        import os
+        from pathlib import Path
+
+        # Save uploaded file to temporary location
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as temp_file:
+            content = await file.read()
+            temp_file.write(content)
+            temp_file_path = temp_file.name
+
+        try:
+            # Install the skill
+            skill_manager = get_skill_manager()
+            installed_skill = await skill_manager.install_skill(temp_file_path)
+
+            # Register the skill as a plugin
+            plugin_registry = get_plugin_registry()
+            skill_config = skill_manager.get_skill_config(installed_skill.id)
+            if skill_config:
+                await plugin_registry.register_skill(skill_config)
+
+            return {
+                "status": "installed",
+                "skill_id": installed_skill.id,
+                "name": installed_skill.metadata.name,
+                "description": installed_skill.metadata.description,
+            }
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+
+    @app.get("/api/skills")
+    async def list_skills():
+        """List all installed skills."""
+        skill_manager = get_skill_manager()
+        skills = skill_manager.list_skills()
+
+        return [
+            {
+                "id": skill.id,
+                "name": skill.metadata.name,
+                "description": skill.metadata.description,
+                "version": skill.metadata.version,
+                "enabled": skill.enabled,
+                "installed_at": skill.installed_at.isoformat(),
+                "agent_count": len(skill.agent_ids),
+            }
+            for skill in skills
+        ]
+
+    @app.post("/api/skills/{skill_id}/bind/{agent_id}")
+    async def bind_skill_to_agent(skill_id: str, agent_id: str):
+        """Bind a skill to an agent."""
+        skill_manager = get_skill_manager()
+        success = await skill_manager.bind_skill_to_agent(skill_id, agent_id)
+
+        if not success:
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+        return {"status": "bound", "skill_id": skill_id, "agent_id": agent_id}
+
+    @app.post("/api/skills/{skill_id}/unbind/{agent_id}")
+    async def unbind_skill_from_agent(skill_id: str, agent_id: str):
+        """Unbind a skill from an agent."""
+        skill_manager = get_skill_manager()
+        success = await skill_manager.unbind_skill_from_agent(skill_id, agent_id)
+
+        if not success:
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+        return {"status": "unbound", "skill_id": skill_id, "agent_id": agent_id}
+
+    @app.get("/api/agents/{agent_id}/skills")
+    async def get_agent_skills(agent_id: str):
+        """Get all skills bound to an agent."""
+        skill_manager = get_skill_manager()
+        skills = skill_manager.get_skills_for_agent(agent_id)
+
+        return [
+            {
+                "id": skill.id,
+                "name": skill.metadata.name,
+                "description": skill.metadata.description,
+                "version": skill.metadata.version,
+                "enabled": skill.enabled,
+                "installed_at": skill.installed_at.isoformat(),
+            }
+            for skill in skills
+        ]
+
+    @app.delete("/api/skills/{skill_id}")
+    async def uninstall_skill(skill_id: str):
+        """Uninstall a skill."""
+        skill_manager = get_skill_manager()
+        success = await skill_manager.uninstall_skill(skill_id)
+
+        if not success:
+            raise HTTPException(status_code=404, detail="Skill not found")
+
+        return {"status": "uninstalled", "skill_id": skill_id}
 
     # ============== System Tools Endpoints ==============
 
