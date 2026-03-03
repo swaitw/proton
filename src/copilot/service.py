@@ -770,7 +770,10 @@ class CopilotService:
             messages[0]["content"] += (
                 f"\n\n## Current Workflow\n"
                 f"The user is currently working on workflow ID: {session.workflow_id}\n"
-                f"Use this ID when calling patch_workflow or get_workflow_summary."
+                f"When the user wants to build a workflow from scratch, use generate_workflow — "
+                f"it will automatically populate agents into this existing workflow.\n"
+                f"Use patch_workflow with this ID to make incremental changes (add/update/delete agents).\n"
+                f"Use get_workflow_summary with this ID to review the current structure."
             )
 
         # Add conversation history

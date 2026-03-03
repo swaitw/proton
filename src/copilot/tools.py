@@ -231,6 +231,9 @@ class CopilotTools:
         """
         Generate a complete workflow from a plan.
 
+        If the session already has a workflow_id (user is inside an existing
+        workflow), populate agents into that workflow instead of creating a new one.
+
         Args:
             args: Plan arguments with title, description, agents
             session: Current copilot session
@@ -245,11 +248,26 @@ class CopilotTools:
                 agents=[AgentPlanTask(**a) for a in args["agents"]],
             )
 
-            # Create the workflow
-            workflow = await self.workflow_manager.create_workflow(
-                name=plan.title,
-                description=plan.description,
-            )
+            # If session already has a workflow, use the existing one
+            workflow = None
+            if session.workflow_id:
+                workflow = await self.workflow_manager.get_workflow(session.workflow_id)
+                if workflow:
+                    # Update name and description from the plan
+                    workflow.name = plan.title
+                    workflow.description = plan.description
+                    workflow.config.name = plan.title
+                    workflow.config.description = plan.description
+                    logger.info(
+                        f"Using existing workflow {workflow.id} for generate_workflow"
+                    )
+
+            # Create a new workflow only if no existing one found
+            if not workflow:
+                workflow = await self.workflow_manager.create_workflow(
+                    name=plan.title,
+                    description=plan.description,
+                )
 
             # Map plan IDs to real agent IDs
             agent_id_map: Dict[str, str] = {}
