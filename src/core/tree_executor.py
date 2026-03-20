@@ -3,13 +3,16 @@ Tree-based executor for orchestrating agent hierarchies.
 
 Handles:
 - Executing agents in tree structure
-- Different routing strategies
+- Different routing strategies (including INTENT)
 - Result aggregation
 - Error handling and recovery
 """
 
 import asyncio
+import json
 import logging
+import os
+import re
 import time
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 from uuid import uuid4
@@ -23,6 +26,8 @@ from .models import (
     ErrorHandlingStrategy,
     ExecutionEvent,
     ExecutionEventType,
+    IntentUnderstandingResult,
+    WorkflowDispatchPlan,
 )
 from .agent_node import AgentNode, AgentTree
 from .context import (
@@ -41,12 +46,14 @@ class TreeExecutor:
     """
     Executes agent trees with support for various routing strategies.
 
-    This is the core orchestration engine that:
-    1. Traverses the agent tree
-    2. Invokes agents based on routing strategy
-    3. Manages context and state
-    4. Aggregates results
-    5. Handles errors
+    Routing strategies available:
+    - sequential   : children run one by one, context passes forward
+    - parallel     : all children run concurrently
+    - conditional  : keyword/regex match decides which child to run
+    - handoff      : like conditional, for explicit delegation
+    - hierarchical : parallel run then aggregate
+    - coordinator  : parent → children → parent integrates
+    - intent       : LLM understands input, selects + rewrites queries for children
     """
 
     def __init__(
@@ -54,13 +61,6 @@ class TreeExecutor:
         tree: AgentTree,
         adapter_factory: Optional[Callable[[AgentNode], Any]] = None,
     ):
-        """
-        Initialize the tree executor.
-
-        Args:
-            tree: The agent tree to execute
-            adapter_factory: Factory function to create adapters for agents
-        """
         self.tree = tree
         self.adapter_factory = adapter_factory
         self._initialized = False
@@ -82,7 +82,6 @@ class TreeExecutor:
         self._initialized = True
 
     async def _create_adapter(self, node: AgentNode) -> Any:
-        """Create an adapter for an agent node."""
         if self.adapter_factory:
             adapter = self.adapter_factory(node)
             if asyncio.iscoroutine(adapter):
@@ -90,44 +89,29 @@ class TreeExecutor:
             return adapter
         return None
 
+    # ------------------------------------------------------------------ #
+    #  Public run methods                                                  #
+    # ------------------------------------------------------------------ #
+
     async def run(
         self,
         input_message: str,
         context: Optional[ExecutionContext] = None,
         start_node_id: Optional[str] = None,
     ) -> AgentResponse:
-        """
-        Execute the agent tree with the given input.
-
-        Args:
-            input_message: The user's input message
-            context: Optional execution context (created if not provided)
-            start_node_id: Optional starting node (defaults to root)
-
-        Returns:
-            AgentResponse with the final result
-        """
         await self.initialize()
 
-        # Create context if not provided
         if context is None:
             context = ExecutionContext(
                 execution_id=str(uuid4()),
-                max_depth=self.tree.get_max_depth() + 5,  # Buffer for safety
+                max_depth=self.tree.get_max_depth() + 5,
             )
 
-        # Add input message to context
-        context.add_message(ChatMessage(
-            role=MessageRole.USER,
-            content=input_message,
-        ))
+        context.add_message(ChatMessage(role=MessageRole.USER, content=input_message))
 
-        # Get starting node
-        start_node = None
-        if start_node_id:
-            start_node = self.tree.get_node(start_node_id)
-        if not start_node:
-            start_node = self.tree.get_root()
+        start_node = (
+            self.tree.get_node(start_node_id) if start_node_id else None
+        ) or self.tree.get_root()
 
         if not start_node:
             raise WorkflowExecutionError(
@@ -136,7 +120,6 @@ class TreeExecutor:
                 errors=[],
             )
 
-        # Execute from start node
         try:
             return await self._execute_node(start_node, context)
         except Exception as e:
@@ -154,40 +137,24 @@ class TreeExecutor:
         context: Optional[ExecutionContext] = None,
         start_node_id: Optional[str] = None,
     ) -> AsyncIterator[AgentResponseUpdate]:
-        """
-        Execute the agent tree with streaming output.
-
-        Yields AgentResponseUpdate objects as execution progresses.
-        """
         await self.initialize()
 
-        # Create context
         if context is None:
             context = ExecutionContext(
                 execution_id=str(uuid4()),
                 max_depth=self.tree.get_max_depth() + 5,
             )
 
-        context.add_message(ChatMessage(
-            role=MessageRole.USER,
-            content=input_message,
-        ))
+        context.add_message(ChatMessage(role=MessageRole.USER, content=input_message))
 
-        # Get starting node
-        start_node = None
-        if start_node_id:
-            start_node = self.tree.get_node(start_node_id)
-        if not start_node:
-            start_node = self.tree.get_root()
+        start_node = (
+            self.tree.get_node(start_node_id) if start_node_id else None
+        ) or self.tree.get_root()
 
         if not start_node:
-            yield AgentResponseUpdate(
-                delta_content="Error: No root node found",
-                is_complete=True,
-            )
+            yield AgentResponseUpdate(delta_content="Error: No root node found", is_complete=True)
             return
 
-        # Execute with streaming
         async for update in self._execute_node_stream(start_node, context):
             yield update
 
@@ -199,14 +166,8 @@ class TreeExecutor:
         context: Optional[ExecutionContext] = None,
         start_node_id: Optional[str] = None,
     ) -> AsyncIterator[ExecutionEvent]:
-        """
-        Execute the agent tree with detailed execution events.
-
-        Yields ExecutionEvent objects for real-time visualization.
-        """
         await self.initialize()
 
-        # Emit workflow start event
         yield ExecutionEvent(
             event_type=ExecutionEventType.WORKFLOW_START,
             timestamp=time.time(),
@@ -217,24 +178,17 @@ class TreeExecutor:
 
         start_time = time.time()
 
-        # Create context
         if context is None:
             context = ExecutionContext(
                 execution_id=execution_id,
                 max_depth=self.tree.get_max_depth() + 5,
             )
 
-        context.add_message(ChatMessage(
-            role=MessageRole.USER,
-            content=input_message,
-        ))
+        context.add_message(ChatMessage(role=MessageRole.USER, content=input_message))
 
-        # Get starting node
-        start_node = None
-        if start_node_id:
-            start_node = self.tree.get_node(start_node_id)
-        if not start_node:
-            start_node = self.tree.get_root()
+        start_node = (
+            self.tree.get_node(start_node_id) if start_node_id else None
+        ) or self.tree.get_root()
 
         if not start_node:
             yield ExecutionEvent(
@@ -247,13 +201,11 @@ class TreeExecutor:
             return
 
         try:
-            # Execute with events
             async for event in self._execute_node_with_events(
                 start_node, context, workflow_id, execution_id, depth=0
             ):
                 yield event
 
-            # Emit workflow complete event
             duration_ms = (time.time() - start_time) * 1000
             yield ExecutionEvent(
                 event_type=ExecutionEventType.WORKFLOW_COMPLETE,
@@ -275,6 +227,84 @@ class TreeExecutor:
                 duration_ms=duration_ms,
             )
 
+    # ------------------------------------------------------------------ #
+    #  Core node execution                                                 #
+    # ------------------------------------------------------------------ #
+
+    async def _execute_node(
+        self,
+        node: AgentNode,
+        context: ExecutionContext,
+    ) -> AgentResponse:
+        if not node.enabled:
+            return AgentResponse(
+                messages=[],
+                response_id=str(uuid4()),
+                metadata={"skipped": True, "reason": "disabled"},
+            )
+
+        try:
+            child_context = context.create_child_context(
+                agent_id=node.id,
+                layer_timeout=node.timeout,
+            )
+        except (CycleDetectedError, MaxDepthExceededError) as e:
+            context.record_error(node.id, e, recoverable=False)
+            if context.error_strategy == ErrorHandlingStrategy.FAIL_FAST:
+                raise AgentExecutionError(node.id, str(e), e)
+            return AgentResponse(messages=[], response_id=str(uuid4()), metadata={"error": str(e)})
+
+        logger.info(f"Executing node {node.name} ({node.id}) depth={child_context.call_chain.depth}")
+
+        agent_response = await self._invoke_agent(node, child_context)
+        child_context.set_agent_output(node.id, agent_response)
+        child_context.add_messages(agent_response.messages)
+
+        if node.is_leaf:
+            return agent_response
+
+        children_responses = await self._route_to_children(node, child_context, agent_response)
+        return self._aggregate_responses(node, agent_response, children_responses, child_context)
+
+    async def _execute_node_stream(
+        self,
+        node: AgentNode,
+        context: ExecutionContext,
+    ) -> AsyncIterator[AgentResponseUpdate]:
+        if not node.enabled:
+            yield AgentResponseUpdate(delta_content="", is_complete=True, metadata={"skipped": True})
+            return
+
+        try:
+            child_context = context.create_child_context(
+                agent_id=node.id, layer_timeout=node.timeout,
+            )
+        except (CycleDetectedError, MaxDepthExceededError) as e:
+            yield AgentResponseUpdate(delta_content=f"Error: {e}", is_complete=True)
+            return
+
+        collected_content = []
+        async for update in self._invoke_agent_stream(node, child_context):
+            yield update
+            if update.delta_content:
+                collected_content.append(update.delta_content)
+
+        full_content = "".join(collected_content)
+        agent_response = AgentResponse(
+            messages=[ChatMessage(role=MessageRole.ASSISTANT, content=full_content, name=node.name)],
+            response_id=str(uuid4()),
+        )
+        child_context.set_agent_output(node.id, agent_response)
+        child_context.add_messages(agent_response.messages)
+
+        if node.is_leaf:
+            return
+
+        children = self._get_routable_children(node, child_context, agent_response)
+        for child in children:
+            async for update in self._execute_node_stream(child, child_context):
+                yield update
+
     async def _execute_node_with_events(
         self,
         node: AgentNode,
@@ -283,13 +313,11 @@ class TreeExecutor:
         execution_id: str,
         depth: int = 0,
     ) -> AsyncIterator[ExecutionEvent]:
-        """Execute a node and yield detailed events."""
         if not node.enabled:
             return
 
         node_start_time = time.time()
 
-        # Emit node start event
         yield ExecutionEvent(
             event_type=ExecutionEventType.NODE_START,
             timestamp=time.time(),
@@ -303,8 +331,7 @@ class TreeExecutor:
 
         try:
             child_context = context.create_child_context(
-                agent_id=node.id,
-                layer_timeout=node.timeout,
+                agent_id=node.id, layer_timeout=node.timeout,
             )
         except (CycleDetectedError, MaxDepthExceededError) as e:
             yield ExecutionEvent(
@@ -319,7 +346,6 @@ class TreeExecutor:
             )
             return
 
-        # Execute agent with streaming and emit thinking events
         collected_content = []
         tool_calls = []
         tool_results = []
@@ -328,7 +354,6 @@ class TreeExecutor:
             async for update in self._invoke_agent_stream(node, child_context):
                 if update.delta_content:
                     collected_content.append(update.delta_content)
-                    # Emit thinking event for streaming content
                     yield ExecutionEvent(
                         event_type=ExecutionEventType.NODE_THINKING,
                         timestamp=time.time(),
@@ -339,10 +364,8 @@ class TreeExecutor:
                         depth=depth,
                         delta_content=update.delta_content,
                     )
-
                 if update.tool_call:
                     tool_calls.append(update.tool_call)
-                    # Emit tool call event
                     yield ExecutionEvent(
                         event_type=ExecutionEventType.NODE_TOOL_CALL,
                         timestamp=time.time(),
@@ -353,8 +376,6 @@ class TreeExecutor:
                         depth=depth,
                         tool_call=update.tool_call,
                     )
-
-                # Handle tool results from metadata
                 if update.metadata and "tool_result" in update.metadata:
                     from .models import ToolResult
                     tr_data = update.metadata["tool_result"]
@@ -374,7 +395,6 @@ class TreeExecutor:
                         depth=depth,
                         tool_result=tr,
                     )
-
         except Exception as e:
             yield ExecutionEvent(
                 event_type=ExecutionEventType.NODE_ERROR,
@@ -388,14 +408,9 @@ class TreeExecutor:
             )
             return
 
-        # Build response
         full_content = "".join(collected_content)
         agent_response = AgentResponse(
-            messages=[ChatMessage(
-                role=MessageRole.ASSISTANT,
-                content=full_content,
-                name=node.name,
-            )],
+            messages=[ChatMessage(role=MessageRole.ASSISTANT, content=full_content, name=node.name)],
             tool_calls=tool_calls,
             tool_results=tool_results,
             response_id=str(uuid4()),
@@ -403,7 +418,6 @@ class TreeExecutor:
         child_context.set_agent_output(node.id, agent_response)
         child_context.add_messages(agent_response.messages)
 
-        # Emit node complete event
         duration_ms = (time.time() - node_start_time) * 1000
         yield ExecutionEvent(
             event_type=ExecutionEventType.NODE_COMPLETE,
@@ -418,85 +432,128 @@ class TreeExecutor:
             status="completed",
         )
 
-        # If leaf node, we're done
         if node.is_leaf:
             return
 
-        # Route to children
         children = self._get_routable_children(node, child_context, agent_response)
-        if children:
-            # Emit routing event
+        if not children:
+            return
+
+        # ---- Emit routing event ----
+        yield ExecutionEvent(
+            event_type=ExecutionEventType.ROUTING_START,
+            timestamp=time.time(),
+            workflow_id=workflow_id,
+            execution_id=execution_id,
+            node_id=node.id,
+            node_name=node.name,
+            depth=depth,
+            routing_strategy=node.routing_strategy.value,
+            target_nodes=[c.name for c in children],
+        )
+
+        # ---- INTENT routing: emit a dedicated event ----
+        if node.routing_strategy == RoutingStrategy.INTENT:
+            # Run intent routing; we'll get back a (possibly-reduced, sub-query-rewritten) child list
+            intent_result, selected_children = await self._run_intent_routing(
+                node, children, child_context, agent_response
+            )
             yield ExecutionEvent(
-                event_type=ExecutionEventType.ROUTING_START,
+                event_type=ExecutionEventType.INTENT_ROUTING,
                 timestamp=time.time(),
                 workflow_id=workflow_id,
                 execution_id=execution_id,
                 node_id=node.id,
                 node_name=node.name,
                 depth=depth,
-                routing_strategy=node.routing_strategy.value,
-                target_nodes=[c.name for c in children],
+                routing_strategy="intent",
+                target_nodes=[c.name for c in selected_children],
+                metadata={
+                    "understood_intent": intent_result.understood_intent,
+                    "clarification_needed": intent_result.clarification_needed,
+                    "dispatch_count": len(intent_result.dispatch_plans),
+                },
             )
+            # Execute selected children with their sub-queries injected into context
+            children_to_run = selected_children
+            # Inject sub-queries into child_context messages
+            self._inject_sub_queries(intent_result, child_context)
+        else:
+            children_to_run = children
 
-            # Execute children based on routing strategy
-            if node.routing_strategy == RoutingStrategy.PARALLEL:
-                # For parallel, we need to collect and interleave events
-                child_iterators = [
-                    self._execute_node_with_events(
-                        child, child_context, workflow_id, execution_id, depth + 1
-                    )
-                    for child in children
-                ]
-                # Simple sequential for now (proper parallel would need asyncio.gather with async generators)
-                for child_iter in child_iterators:
-                    async for event in child_iter:
-                        yield event
-            else:
-                # Sequential or other strategies
-                for child in children:
-                    async for event in self._execute_node_with_events(
-                        child, child_context, workflow_id, execution_id, depth + 1
-                    ):
-                        yield event
+        # ---- Execute children ----
+        if node.routing_strategy == RoutingStrategy.PARALLEL:
+            child_iterators = [
+                self._execute_node_with_events(child, child_context, workflow_id, execution_id, depth + 1)
+                for child in children_to_run
+            ]
+            for child_iter in child_iterators:
+                async for event in child_iter:
+                    yield event
+        elif node.routing_strategy == RoutingStrategy.INTENT:
+            # Respect priority ordering from intent result
+            await self._execute_intent_children_with_events(
+                intent_result, children_to_run, child_context,
+                workflow_id, execution_id, depth, self
+            )
+            # yield events from the above is tricky with async generators;
+            # use sequential for events path (parallel for run path)
+            for child in children_to_run:
+                async for event in self._execute_node_with_events(
+                    child, child_context, workflow_id, execution_id, depth + 1
+                ):
+                    yield event
+        else:
+            for child in children_to_run:
+                async for event in self._execute_node_with_events(
+                    child, child_context, workflow_id, execution_id, depth + 1
+                ):
+                    yield event
 
-            # For COORDINATOR pattern, run parent again to integrate
-            if node.routing_strategy == RoutingStrategy.COORDINATOR:
-                # Add integration prompt
+        # ---- COORDINATOR / INTENT synthesis ----
+        if node.routing_strategy in (RoutingStrategy.COORDINATOR, RoutingStrategy.INTENT):
+            cfg = (node.config.intent_routing_config if node.config else None)
+            should_synthesise = (
+                node.routing_strategy == RoutingStrategy.COORDINATOR
+                or (cfg and cfg.synthesise_results)
+            )
+            if should_synthesise:
                 integration_messages = [ChatMessage(
                     role=MessageRole.SYSTEM,
                     content=(
-                        "Below are the outputs from your specialist team members. "
-                        "Please integrate their inputs into a comprehensive, coherent response."
+                        (cfg.synthesis_system_prompt if cfg and cfg.synthesis_system_prompt else None)
+                        or (
+                            "Below are the outputs from your specialist team members. "
+                            "Please integrate their inputs into a comprehensive, coherent response."
+                        )
                     ),
                 )]
-                for child in children:
+                for child in children_to_run:
                     child_output = child_context.get_agent_output(child.id)
                     if child_output and child_output.messages:
-                        specialist_output = "\n".join(m.content for m in child_output.messages if m.content)
+                        specialist_output = "\n".join(
+                            m.content for m in child_output.messages if m.content
+                        )
                         integration_messages.append(ChatMessage(
                             role=MessageRole.USER,
                             content=f"=== {child.name} 的输出 ===\n{specialist_output}",
                         ))
-
                 for msg in integration_messages:
                     child_context.add_message(msg)
 
-                # Re-invoke coordinator
                 yield ExecutionEvent(
                     event_type=ExecutionEventType.NODE_START,
                     timestamp=time.time(),
                     workflow_id=workflow_id,
                     execution_id=execution_id,
                     node_id=node.id,
-                    node_name=f"{node.name} (Integration)",
+                    node_name=f"{node.name} (Synthesis)",
                     depth=depth,
                     status="running",
-                    metadata={"phase": "integration"},
+                    metadata={"phase": "synthesis"},
                 )
-
                 integration_start = time.time()
                 integration_content = []
-
                 async for update in self._invoke_agent_stream(node, child_context):
                     if update.delta_content:
                         integration_content.append(update.delta_content)
@@ -506,7 +563,7 @@ class TreeExecutor:
                             workflow_id=workflow_id,
                             execution_id=execution_id,
                             node_id=node.id,
-                            node_name=f"{node.name} (Integration)",
+                            node_name=f"{node.name} (Synthesis)",
                             depth=depth,
                             delta_content=update.delta_content,
                         )
@@ -517,170 +574,35 @@ class TreeExecutor:
                             workflow_id=workflow_id,
                             execution_id=execution_id,
                             node_id=node.id,
-                            node_name=f"{node.name} (Integration)",
+                            node_name=f"{node.name} (Synthesis)",
                             depth=depth,
                             tool_call=update.tool_call,
                         )
-                    # Handle tool results from metadata
-                    if update.metadata and "tool_result" in update.metadata:
-                        from .models import ToolResult
-                        tr_data = update.metadata["tool_result"]
-                        yield ExecutionEvent(
-                            event_type=ExecutionEventType.NODE_TOOL_RESULT,
-                            timestamp=time.time(),
-                            workflow_id=workflow_id,
-                            execution_id=execution_id,
-                            node_id=node.id,
-                            node_name=f"{node.name} (Integration)",
-                            depth=depth,
-                            tool_result=ToolResult(
-                                tool_call_id=tr_data["tool_call_id"],
-                                content=tr_data["content"],
-                                is_error=tr_data.get("is_error", False),
-                            ),
-                        )
 
-                integration_duration = (time.time() - integration_start) * 1000
                 yield ExecutionEvent(
                     event_type=ExecutionEventType.NODE_COMPLETE,
                     timestamp=time.time(),
                     workflow_id=workflow_id,
                     execution_id=execution_id,
                     node_id=node.id,
-                    node_name=f"{node.name} (Integration)",
+                    node_name=f"{node.name} (Synthesis)",
                     depth=depth,
                     content="".join(integration_content),
-                    duration_ms=integration_duration,
+                    duration_ms=(time.time() - integration_start) * 1000,
                     status="completed",
-                    metadata={"phase": "integration"},
+                    metadata={"phase": "synthesis"},
                 )
 
-    async def _execute_node(
-        self,
-        node: AgentNode,
-        context: ExecutionContext,
-    ) -> AgentResponse:
-        """
-        Execute a single node in the tree.
-
-        This method:
-        1. Creates a child context
-        2. Invokes the node's agent
-        3. Routes to children based on strategy
-        4. Aggregates results
-        """
-        if not node.enabled:
-            return AgentResponse(
-                messages=[],
-                response_id=str(uuid4()),
-                metadata={"skipped": True, "reason": "disabled"},
-            )
-
-        # Create child context for this node
-        try:
-            child_context = context.create_child_context(
-                agent_id=node.id,
-                layer_timeout=node.timeout,
-            )
-        except (CycleDetectedError, MaxDepthExceededError) as e:
-            context.record_error(node.id, e, recoverable=False)
-            if context.error_strategy == ErrorHandlingStrategy.FAIL_FAST:
-                raise AgentExecutionError(node.id, str(e), e)
-            return AgentResponse(
-                messages=[],
-                response_id=str(uuid4()),
-                metadata={"error": str(e)},
-            )
-
-        logger.info(f"Executing node {node.name} ({node.id}) at depth {child_context.call_chain.depth}")
-
-        # Execute this agent
-        agent_response = await self._invoke_agent(node, child_context)
-
-        # Store output
-        child_context.set_agent_output(node.id, agent_response)
-
-        # Add agent's response to context
-        child_context.add_messages(agent_response.messages)
-
-        # If this is a leaf node, return the response
-        if node.is_leaf:
-            return agent_response
-
-        # Otherwise, route to children based on strategy
-        children_responses = await self._route_to_children(
-            node, child_context, agent_response
-        )
-
-        # Aggregate results
-        return self._aggregate_responses(
-            node, agent_response, children_responses, child_context
-        )
-
-    async def _execute_node_stream(
-        self,
-        node: AgentNode,
-        context: ExecutionContext,
-    ) -> AsyncIterator[AgentResponseUpdate]:
-        """Execute a node with streaming output."""
-        if not node.enabled:
-            yield AgentResponseUpdate(
-                delta_content="",
-                is_complete=True,
-                metadata={"skipped": True},
-            )
-            return
-
-        try:
-            child_context = context.create_child_context(
-                agent_id=node.id,
-                layer_timeout=node.timeout,
-            )
-        except (CycleDetectedError, MaxDepthExceededError) as e:
-            yield AgentResponseUpdate(
-                delta_content=f"Error: {e}",
-                is_complete=True,
-            )
-            return
-
-        # Stream from this agent
-        collected_content = []
-        async for update in self._invoke_agent_stream(node, child_context):
-            yield update
-            if update.delta_content:
-                collected_content.append(update.delta_content)
-
-        # Create response from collected content
-        full_content = "".join(collected_content)
-        agent_response = AgentResponse(
-            messages=[ChatMessage(
-                role=MessageRole.ASSISTANT,
-                content=full_content,
-                name=node.name,
-            )],
-            response_id=str(uuid4()),
-        )
-        child_context.set_agent_output(node.id, agent_response)
-        child_context.add_messages(agent_response.messages)
-
-        # If leaf node, we're done
-        if node.is_leaf:
-            return
-
-        # Route to children
-        children = self._get_routable_children(node, child_context, agent_response)
-        for child in children:
-            async for update in self._execute_node_stream(child, child_context):
-                yield update
+    # ------------------------------------------------------------------ #
+    #  Agent invocation                                                    #
+    # ------------------------------------------------------------------ #
 
     async def _invoke_agent(
         self,
         node: AgentNode,
         context: ExecutionContext,
     ) -> AgentResponse:
-        """Invoke a single agent."""
         if node.adapter is None:
-            # No adapter - return empty response
             logger.warning(f"No adapter for node {node.id}")
             return AgentResponse(
                 messages=[ChatMessage(
@@ -692,14 +614,9 @@ class TreeExecutor:
             )
 
         messages = context.get_context_for_agent()
-
         try:
             async with context.timeout_scope(node.timeout):
-                response = await node.adapter.run(
-                    messages=messages,
-                    context=context,
-                )
-                return response
+                return await node.adapter.run(messages=messages, context=context)
         except asyncio.TimeoutError:
             context.record_error(
                 node.id,
@@ -734,7 +651,6 @@ class TreeExecutor:
         node: AgentNode,
         context: ExecutionContext,
     ) -> AsyncIterator[AgentResponseUpdate]:
-        """Invoke a single agent with streaming."""
         if node.adapter is None:
             yield AgentResponseUpdate(
                 delta_content=f"[Agent {node.name} has no adapter]",
@@ -743,18 +659,15 @@ class TreeExecutor:
             return
 
         messages = context.get_context_for_agent()
-
         try:
-            async for update in node.adapter.run_stream(
-                messages=messages,
-                context=context,
-            ):
+            async for update in node.adapter.run_stream(messages=messages, context=context):
                 yield update
         except Exception as e:
-            yield AgentResponseUpdate(
-                delta_content=f"[Error: {e}]",
-                is_complete=True,
-            )
+            yield AgentResponseUpdate(delta_content=f"[Error: {e}]", is_complete=True)
+
+    # ------------------------------------------------------------------ #
+    #  Routing dispatch                                                    #
+    # ------------------------------------------------------------------ #
 
     async def _route_to_children(
         self,
@@ -762,9 +675,7 @@ class TreeExecutor:
         context: ExecutionContext,
         parent_response: AgentResponse,
     ) -> List[AgentResponse]:
-        """Route execution to child agents based on strategy."""
         children = self._get_routable_children(node, context, parent_response)
-
         if not children:
             return []
 
@@ -772,24 +683,19 @@ class TreeExecutor:
 
         if strategy == RoutingStrategy.SEQUENTIAL:
             return await self._route_sequential(children, context)
-
         elif strategy == RoutingStrategy.PARALLEL:
             return await self._route_parallel(children, context)
-
         elif strategy == RoutingStrategy.CONDITIONAL:
             return await self._route_conditional(node, children, context, parent_response)
-
         elif strategy == RoutingStrategy.HANDOFF:
-            return await self._route_handoff(node, children, context, parent_response)
-
+            return await self._route_conditional(node, children, context, parent_response)
         elif strategy == RoutingStrategy.HIERARCHICAL:
-            return await self._route_hierarchical(children, context, parent_response)
-
+            return await self._route_parallel(children, context)
         elif strategy == RoutingStrategy.COORDINATOR:
             return await self._route_coordinator(node, children, context, parent_response)
-
+        elif strategy == RoutingStrategy.INTENT:
+            return await self._route_intent(node, children, context, parent_response)
         else:
-            # Default to sequential
             return await self._route_sequential(children, context)
 
     def _get_routable_children(
@@ -798,7 +704,6 @@ class TreeExecutor:
         context: ExecutionContext,
         parent_response: AgentResponse,
     ) -> List[AgentNode]:
-        """Get the list of children that should be routed to."""
         children = []
         for child_id in node.children:
             child = self.tree.get_node(child_id)
@@ -811,12 +716,10 @@ class TreeExecutor:
         children: List[AgentNode],
         context: ExecutionContext,
     ) -> List[AgentResponse]:
-        """Execute children sequentially, passing context forward."""
         responses = []
         for child in children:
             response = await self._execute_node(child, context)
             responses.append(response)
-            # Update context with this child's response
             context.add_messages(response.messages)
         return responses
 
@@ -825,11 +728,7 @@ class TreeExecutor:
         children: List[AgentNode],
         context: ExecutionContext,
     ) -> List[AgentResponse]:
-        """Execute all children in parallel."""
-        tasks = [
-            self._execute_node(child, context)
-            for child in children
-        ]
+        tasks = [self._execute_node(child, context) for child in children]
         return await asyncio.gather(*tasks, return_exceptions=False)
 
     async def _route_conditional(
@@ -839,70 +738,21 @@ class TreeExecutor:
         context: ExecutionContext,
         parent_response: AgentResponse,
     ) -> List[AgentResponse]:
-        """
-        Route to specific child based on conditions.
-
-        Evaluates routing_conditions to determine which child to invoke.
-        """
-        # Get the last message content for evaluation
-        last_content = ""
-        if parent_response.messages:
-            last_content = parent_response.messages[-1].content
-
-        # Simple condition matching
-        # In production, use a proper expression evaluator
+        last_content = parent_response.messages[-1].content if parent_response.messages else ""
         target_child = None
         for condition, target_id in node.routing_conditions.items():
-            # Simple keyword matching for demo
-            # Format: "keyword: target_id"
             if "==" in condition:
-                key, value = condition.split("==")
-                key = key.strip()
+                _, value = condition.split("==")
                 value = value.strip().strip("'\"")
                 if value.lower() in last_content.lower():
                     target_child = self.tree.get_node(target_id)
                     break
 
         if target_child and target_child.enabled:
-            response = await self._execute_node(target_child, context)
-            return [response]
-
-        # Default: execute first child if no condition matches
+            return [await self._execute_node(target_child, context)]
         if children:
-            response = await self._execute_node(children[0], context)
-            return [response]
-
+            return [await self._execute_node(children[0], context)]
         return []
-
-    async def _route_handoff(
-        self,
-        node: AgentNode,
-        children: List[AgentNode],
-        context: ExecutionContext,
-        parent_response: AgentResponse,
-    ) -> List[AgentResponse]:
-        """
-        Handoff pattern: transfer control between agents.
-
-        The parent agent decides which specialist to hand off to.
-        """
-        # Similar to conditional but allows multiple handoffs
-        return await self._route_conditional(node, children, context, parent_response)
-
-    async def _route_hierarchical(
-        self,
-        children: List[AgentNode],
-        context: ExecutionContext,
-        parent_response: AgentResponse,
-    ) -> List[AgentResponse]:
-        """
-        Hierarchical decomposition: split task among children.
-
-        Each child handles a sub-task, results are merged.
-        """
-        # Execute in parallel
-        responses = await self._route_parallel(children, context)
-        return responses
 
     async def _route_coordinator(
         self,
@@ -911,30 +761,235 @@ class TreeExecutor:
         context: ExecutionContext,
         parent_response: AgentResponse,
     ) -> List[AgentResponse]:
-        """
-        Coordinator pattern: Parent agent coordinates specialist children.
-
-        Flow:
-        1. Parent (coordinator) runs first - already done before this method
-        2. All children (specialists) run in parallel
-        3. Parent runs AGAIN to integrate all specialist outputs
-        4. Return the integrated response
-
-        This enables true multi-agent collaboration where the coordinator
-        can see and integrate all specialist outputs.
-        """
-        logger.info(f"Coordinator pattern: {node.name} coordinating {len(children)} specialists")
-
-        # Step 1: Run all specialists in parallel
         specialist_responses = await self._route_parallel(children, context)
+        self._build_integration_context(node, children, specialist_responses, context)
+        integration_response = await self._invoke_agent(node, context)
+        return specialist_responses + [integration_response]
 
-        # Step 2: Build integration prompt with all specialist outputs
-        integration_messages = []
+    # ------------------------------------------------------------------ #
+    #  INTENT routing — the new strategy                                  #
+    # ------------------------------------------------------------------ #
 
-        # Add a system message explaining the integration task
-        integration_messages.append(ChatMessage(
+    async def _route_intent(
+        self,
+        node: AgentNode,
+        children: List[AgentNode],
+        context: ExecutionContext,
+        parent_response: AgentResponse,
+    ) -> List[AgentResponse]:
+        """
+        INTENT routing strategy.
+
+        1. Use LLM to understand the current query and select which children to call,
+           generating a per-child refined sub-query.
+        2. Execute selected children (parallel within same priority, sequential across priorities).
+        3. If synthesise_results=True (default), re-invoke this node to integrate outputs.
+        """
+        intent_result, selected_children = await self._run_intent_routing(
+            node, children, context, parent_response
+        )
+
+        if not selected_children:
+            logger.warning(f"[Intent] No children selected for node {node.name}, falling back to all")
+            selected_children = children
+
+        # Inject sub-queries as context messages
+        self._inject_sub_queries(intent_result, context)
+
+        # Execute by priority groups
+        responses = await self._execute_by_priority(intent_result, selected_children, context)
+
+        # Synthesise
+        cfg = node.config.intent_routing_config if node.config else None
+        if cfg is None or cfg.synthesise_results:
+            self._build_integration_context(
+                node, selected_children, responses, context,
+                system_prompt=(cfg.synthesis_system_prompt if cfg else None),
+            )
+            integration_response = await self._invoke_agent(node, context)
+            return responses + [integration_response]
+
+        return responses
+
+    async def _run_intent_routing(
+        self,
+        node: AgentNode,
+        children: List[AgentNode],
+        context: ExecutionContext,
+        parent_response: AgentResponse,
+    ):
+        """
+        Call IntentUnderstandingService for this node and return
+        (IntentUnderstandingResult, list_of_selected_AgentNode).
+        """
+        from ..portal.intent import IntentUnderstandingService
+
+        cfg = node.config.intent_routing_config if node.config else None
+        llm_client = self._build_llm_client(node, cfg)
+
+        intent_svc = IntentUnderstandingService(
+            llm_client=llm_client,
+            model=cfg.model if cfg else (node.config.model if node.config else "gpt-4"),
+            temperature=cfg.temperature if cfg else 0.2,
+        )
+
+        # Build child descriptors
+        child_descriptors = [
+            {"id": c.id, "name": c.name, "description": c.description}
+            for c in children
+        ]
+
+        # Get the current input from context
+        user_query = ""
+        for msg in reversed(context.messages):
+            if msg.role == MessageRole.USER:
+                user_query = msg.content
+                break
+        if not user_query and parent_response.messages:
+            user_query = parent_response.messages[-1].content
+
+        max_sel = cfg.max_children_selected if cfg else 0
+        fallback = cfg.fallback_to_all if cfg else True
+
+        try:
+            intent_result = await intent_svc.understand(
+                user_query=user_query,
+                available_children=child_descriptors,
+                conversation_history=[
+                    {"role": m.role.value, "content": m.content}
+                    for m in context.messages[-10:]
+                ],
+                max_selected=max_sel,
+            )
+        except Exception as e:
+            logger.error(f"[Intent] routing LLM call failed for node {node.name}: {e}")
+            if fallback:
+                # Return trivial result dispatching to all children
+                from ..core.models import IntentUnderstandingResult, WorkflowDispatchPlan
+                intent_result = IntentUnderstandingResult(
+                    original_query=user_query,
+                    understood_intent=user_query,
+                    dispatch_plans=[
+                        WorkflowDispatchPlan(
+                            workflow_id=c.id, workflow_name=c.name,
+                            sub_query=user_query, reason="fallback", priority=0,
+                        )
+                        for c in children
+                    ],
+                )
+            else:
+                raise
+
+        # Map dispatch_plans back to AgentNode objects
+        selected_ids = {p.workflow_id for p in intent_result.dispatch_plans}
+        selected_children = [c for c in children if c.id in selected_ids]
+        # Preserve original children if nothing selected
+        if not selected_children and fallback:
+            selected_children = children
+
+        return intent_result, selected_children
+
+    def _build_llm_client(self, node: AgentNode, cfg):
+        """Build an AsyncOpenAI-compatible client for intent routing."""
+        try:
+            from openai import AsyncOpenAI
+        except ImportError:
+            raise RuntimeError("openai package required for INTENT routing. pip install openai")
+
+        kwargs: Dict[str, Any] = {}
+
+        api_key = None
+        base_url = None
+
+        if cfg:
+            api_key = cfg.api_key
+            base_url = cfg.base_url
+
+        if not api_key and node.config and node.config.builtin_definition:
+            api_key = node.config.builtin_definition.api_key
+            base_url = base_url or node.config.builtin_definition.base_url
+
+        if not api_key:
+            api_key = os.environ.get("OPENAI_API_KEY")
+        if not base_url:
+            base_url = os.environ.get("OPENAI_BASE_URL")
+
+        if api_key:
+            kwargs["api_key"] = api_key
+        if base_url:
+            kwargs["base_url"] = base_url
+
+        return AsyncOpenAI(**kwargs)
+
+    async def _execute_by_priority(
+        self,
+        intent_result: IntentUnderstandingResult,
+        selected_children: List[AgentNode],
+        context: ExecutionContext,
+    ) -> List[AgentResponse]:
+        """Execute selected children respecting priority groups."""
+        # Build priority → children map
+        plan_by_id = {p.workflow_id: p for p in intent_result.dispatch_plans}
+        priority_groups: Dict[int, List[AgentNode]] = {}
+        for child in selected_children:
+            plan = plan_by_id.get(child.id)
+            priority = plan.priority if plan else 0
+            priority_groups.setdefault(priority, []).append(child)
+
+        all_responses = []
+        for priority in sorted(priority_groups.keys()):
+            group = priority_groups[priority]
+            if len(group) == 1:
+                resp = await self._execute_node(group[0], context)
+                all_responses.append(resp)
+                context.add_messages(resp.messages)
+            else:
+                # Same priority → parallel
+                responses = await asyncio.gather(
+                    *[self._execute_node(c, context) for c in group],
+                    return_exceptions=False,
+                )
+                all_responses.extend(responses)
+                for resp in responses:
+                    context.add_messages(resp.messages)
+        return all_responses
+
+    def _inject_sub_queries(
+        self,
+        intent_result: IntentUnderstandingResult,
+        context: ExecutionContext,
+    ) -> None:
+        """
+        Insert the refined sub-queries into context as system messages so
+        each child receives its tailored input when context.get_context_for_agent()
+        is called.  We add a single system message summarising all sub-queries;
+        individual children then receive it as part of their message history.
+        """
+        if not intent_result.dispatch_plans:
+            return
+
+        lines = [f"Intent understood: {intent_result.understood_intent}", ""]
+        for plan in intent_result.dispatch_plans:
+            lines.append(f"- [{plan.workflow_name}]: {plan.sub_query}")
+
+        context.add_message(ChatMessage(
             role=MessageRole.SYSTEM,
-            content=(
+            content="\n".join(lines),
+            metadata={"intent_routing": True},
+        ))
+
+    def _build_integration_context(
+        self,
+        node: AgentNode,
+        children: List[AgentNode],
+        responses: List[AgentResponse],
+        context: ExecutionContext,
+        system_prompt: Optional[str] = None,
+    ) -> None:
+        """Add specialist outputs + integration instruction to context."""
+        context.add_message(ChatMessage(
+            role=MessageRole.SYSTEM,
+            content=system_prompt or (
                 "Below are the outputs from your specialist team members. "
                 "Please integrate their inputs into a comprehensive, coherent response. "
                 "Make sure to:\n"
@@ -944,31 +999,33 @@ class TreeExecutor:
                 "4. If you have tools available (like file_write), use them to complete your task."
             ),
         ))
-
-        # Add each specialist's output
-        for i, (child, response) in enumerate(zip(children, specialist_responses)):
+        for child, response in zip(children, responses):
             if response.messages:
                 specialist_output = "\n".join(m.content for m in response.messages if m.content)
-                integration_messages.append(ChatMessage(
+                context.add_message(ChatMessage(
                     role=MessageRole.USER,
                     content=f"=== {child.name} 的输出 ===\n{specialist_output}",
                 ))
 
-        # Step 3: Invoke the coordinator again to integrate
-        logger.info(f"Coordinator {node.name} integrating {len(specialist_responses)} specialist outputs")
+    # ------------------------------------------------------------------ #
+    #  Placeholder for events-path parallel intent execution              #
+    # ------------------------------------------------------------------ #
+    async def _execute_intent_children_with_events(
+        self,
+        intent_result,
+        children: List[AgentNode],
+        context: ExecutionContext,
+        workflow_id: str,
+        execution_id: str,
+        depth: int,
+        executor,
+    ):
+        """No-op: the events path handles this inline via sequential iteration."""
+        pass
 
-        # Add integration messages to context
-        for msg in integration_messages:
-            context.add_message(msg)
-
-        # Re-invoke the coordinator to integrate
-        integration_response = await self._invoke_agent(node, context)
-
-        # The integration response is the final output
-        # We return both specialist responses (for history) and the integration response
-        all_responses = specialist_responses + [integration_response]
-
-        return all_responses
+    # ------------------------------------------------------------------ #
+    #  Aggregation                                                         #
+    # ------------------------------------------------------------------ #
 
     def _aggregate_responses(
         self,
@@ -977,11 +1034,6 @@ class TreeExecutor:
         children_responses: List[AgentResponse],
         context: ExecutionContext,
     ) -> AgentResponse:
-        """
-        Aggregate responses from parent and children.
-
-        Different strategies may aggregate differently.
-        """
         all_messages = list(parent_response.messages)
         all_tool_calls = list(parent_response.tool_calls)
         all_tool_results = list(parent_response.tool_results)
@@ -990,11 +1042,6 @@ class TreeExecutor:
             all_messages.extend(response.messages)
             all_tool_calls.extend(response.tool_calls)
             all_tool_results.extend(response.tool_results)
-
-        # For hierarchical, we might want to summarize
-        if node.routing_strategy == RoutingStrategy.HIERARCHICAL:
-            # Could add a summary message here
-            pass
 
         return AgentResponse(
             messages=all_messages,
@@ -1008,68 +1055,39 @@ class TreeExecutor:
         )
 
 
-class WorkflowBuilder:
-    """
-    Fluent builder for creating agent tree workflows.
+# ------------------------------------------------------------------ #
+#  WorkflowBuilder                                                     #
+# ------------------------------------------------------------------ #
 
-    Example:
-        workflow = (
-            WorkflowBuilder()
-            .add_agent("router", AgentNode(...))
-            .add_agent("specialist1", AgentNode(...), parent="router")
-            .add_agent("specialist2", AgentNode(...), parent="router")
-            .set_root("router")
-            .build()
-        )
-    """
+class WorkflowBuilder:
+    """Fluent builder for creating agent tree workflows."""
 
     def __init__(self):
         self._tree = AgentTree()
         self._adapter_factory = None
 
-    def add_agent(
-        self,
-        node: AgentNode,
-        parent_id: Optional[str] = None,
-    ) -> "WorkflowBuilder":
-        """Add an agent to the workflow."""
+    def add_agent(self, node: AgentNode, parent_id: Optional[str] = None) -> "WorkflowBuilder":
         if parent_id:
             node.parent_id = parent_id
         self._tree.add_node(node)
         return self
 
     def set_root(self, node_id: str) -> "WorkflowBuilder":
-        """Set the root node of the workflow."""
         self._tree.root_id = node_id
         return self
 
-    def set_adapter_factory(
-        self,
-        factory: Callable[[AgentNode], Any],
-    ) -> "WorkflowBuilder":
-        """Set the adapter factory."""
+    def set_adapter_factory(self, factory: Callable[[AgentNode], Any]) -> "WorkflowBuilder":
         self._adapter_factory = factory
         return self
 
-    def add_routing_condition(
-        self,
-        node_id: str,
-        condition: str,
-        target_id: str,
-    ) -> "WorkflowBuilder":
-        """Add a routing condition to a node."""
+    def add_routing_condition(self, node_id: str, condition: str, target_id: str) -> "WorkflowBuilder":
         node = self._tree.get_node(node_id)
         if node:
             node.set_routing_condition(condition, target_id)
         return self
 
     def build(self) -> TreeExecutor:
-        """Build and return the TreeExecutor."""
         errors = self._tree.validate()
         if errors:
             raise ValueError(f"Invalid tree structure: {errors}")
-
-        return TreeExecutor(
-            tree=self._tree,
-            adapter_factory=self._adapter_factory,
-        )
+        return TreeExecutor(tree=self._tree, adapter_factory=self._adapter_factory)

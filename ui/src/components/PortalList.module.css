@@ -1,0 +1,444 @@
+/* PortalList.module.css */
+
+/* ---------- Layout ---------- */
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 28px 32px;
+  gap: 24px;
+  overflow-y: auto;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.headerLeft h2 {
+  font-family: var(--font-family-heading);
+  font-size: 1.4rem;
+  color: var(--color-text);
+  margin-bottom: 4px;
+}
+
+.headerLeft p {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+/* ---------- Cards ---------- */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 18px;
+}
+
+.card {
+  background: var(--color-primary);
+  border: 1px solid var(--color-secondary);
+  border-radius: 12px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.card:hover {
+  border-color: var(--color-cta);
+  box-shadow: 0 0 0 1px var(--color-cta);
+}
+
+.cardHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.cardIcon {
+  width: 42px;
+  height: 42px;
+  background: rgba(34, 197, 94, 0.12);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.3rem;
+  flex-shrink: 0;
+}
+
+.cardTitle {
+  flex: 1;
+}
+
+.cardTitle h3 {
+  font-family: var(--font-family-heading);
+  font-size: 1rem;
+  color: var(--color-text);
+  margin-bottom: 3px;
+}
+
+.cardTitle p {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  line-height: 1.4;
+}
+
+.cardMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.badge {
+  font-size: 0.72rem;
+  padding: 3px 8px;
+  border-radius: 20px;
+  font-weight: 600;
+}
+
+.badgeGreen {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+}
+
+.badgeBlue {
+  background: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+}
+
+.badgeGray {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--color-text-muted);
+}
+
+.wfCount {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+.cardActions {
+  display: flex;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+
+/* ---------- Buttons ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 7px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.18s;
+}
+
+.btnPrimary {
+  background: var(--color-cta);
+  color: #0f172a;
+  border-color: var(--color-cta);
+}
+
+.btnPrimary:hover { opacity: 0.85; }
+
+.btnSecondary {
+  background: transparent;
+  color: var(--color-text);
+  border-color: var(--color-secondary);
+}
+
+.btnSecondary:hover {
+  background: var(--color-secondary);
+}
+
+.btnGhost {
+  background: transparent;
+  color: var(--color-text-muted);
+  border: none;
+  padding: 6px 10px;
+}
+
+.btnGhost:hover {
+  color: var(--color-text);
+  background: rgba(255,255,255,0.06);
+}
+
+.btnDanger {
+  background: transparent;
+  color: #f87171;
+  border: none;
+  padding: 6px 10px;
+}
+
+.btnDanger:hover {
+  background: rgba(248,113,113,0.1);
+}
+
+/* ---------- Empty state ---------- */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 80px 20px;
+  color: var(--color-text-muted);
+  gap: 16px;
+  text-align: center;
+}
+
+.emptyIcon {
+  font-size: 3rem;
+  opacity: 0.4;
+}
+
+.empty h3 {
+  font-size: 1.1rem;
+  color: var(--color-text);
+}
+
+.empty p {
+  font-size: 0.85rem;
+  max-width: 300px;
+  line-height: 1.5;
+}
+
+/* ---------- Modal ---------- */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(3px);
+}
+
+.modal {
+  background: var(--color-primary);
+  border: 1px solid var(--color-secondary);
+  border-radius: 14px;
+  width: 580px;
+  max-width: 95vw;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.modalTitle {
+  font-family: var(--font-family-heading);
+  font-size: 1.15rem;
+  color: var(--color-text);
+  margin-bottom: 4px;
+}
+
+.modalSubtitle {
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+
+/* ---------- Form ---------- */
+.formGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.input, .textarea, .select {
+  background: var(--color-background);
+  border: 1px solid var(--color-secondary);
+  border-radius: 7px;
+  color: var(--color-text);
+  padding: 9px 12px;
+  font-size: 0.9rem;
+  font-family: var(--font-family-body);
+  transition: border-color 0.18s;
+  width: 100%;
+}
+
+.input:focus, .textarea:focus, .select:focus {
+  outline: none;
+  border-color: var(--color-cta);
+}
+
+.textarea {
+  resize: vertical;
+  min-height: 68px;
+}
+
+.select {
+  cursor: pointer;
+}
+
+/* ---------- Workflow checkbox list ---------- */
+.wfList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--color-secondary);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.wfItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.wfItem:hover {
+  background: rgba(255,255,255,0.04);
+}
+
+.wfItemChecked {
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.wfCheckbox {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  accent-color: var(--color-cta);
+  margin-top: 2px;
+  cursor: pointer;
+}
+
+.wfItemInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.wfItemName {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.wfItemDesc {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wfItemMeta {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.wfEmpty {
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  padding: 24px;
+}
+
+/* ---------- Row (2-col form) ---------- */
+.row2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+/* ---------- Modal footer ---------- */
+.modalFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+
+/* ---------- Key display ---------- */
+.keyBox {
+  background: var(--color-background);
+  border: 1px solid var(--color-secondary);
+  border-radius: 7px;
+  padding: 10px 14px;
+  font-family: monospace;
+  font-size: 0.82rem;
+  color: #4ade80;
+  word-break: break-all;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* ---------- Section divider ---------- */
+.sectionDivider {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sectionDivider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--color-secondary);
+}
+
+/* ---------- Spinner ---------- */
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255,255,255,0.2);
+  border-top-color: var(--color-cta);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ---------- Scrollbar ---------- */
+.wfList::-webkit-scrollbar,
+.modal::-webkit-scrollbar {
+  width: 5px;
+}
+.wfList::-webkit-scrollbar-track,
+.modal::-webkit-scrollbar-track {
+  background: transparent;
+}
+.wfList::-webkit-scrollbar-thumb,
+.modal::-webkit-scrollbar-thumb {
+  background: var(--color-secondary);
+  border-radius: 3px;
+}

@@ -243,6 +243,15 @@ async def lifespan(app: FastAPI):
     manager = get_workflow_manager()
     await manager._ensure_storage()
 
+    # Pre-load portals
+    try:
+        from ..portal import get_portal_manager
+        portal_mgr = get_portal_manager()
+        await portal_mgr._ensure_ready()
+        logger.info("Portal manager initialized")
+    except Exception as e:
+        logger.warning(f"Failed to initialize portal manager: {e}")
+
     yield
 
     # Shutdown
@@ -471,6 +480,269 @@ def create_app() -> FastAPI:
         await manager.save_current_state(workflow_id)
 
         return {"status": "removed", "id": agent_id}
+
+    # ============== Workflow Nesting Endpoints ==============
+
+    @app.post(
+        "/api/workflows/{workflow_id}/agents/{agent_id}/bind-workflow",
+        summary="将 Agent 节点绑定为子工作流（实现无限嵌套树）",
+    )
+    async def bind_agent_to_workflow(
+        workflow_id: str,
+        agent_id: str,
+        body: Dict[str, Any],
+    ):
+        """
+        将一个 Agent 节点转换为 WORKFLOW 类型，使其代理调用另一个完整工作流。
+
+        这实现了无限深度的树形嵌套结构：
+          Portal → WorkflowA → AgentX (type=WORKFLOW) → WorkflowB → AgentY → WorkflowC → ...
+
+        body 参数：
+        - sub_workflow_id (str, required): 要绑定的子工作流 ID
+        - input_mapping (dict, optional): 输入键映射 {"target_key": "source_key"}
+        - output_mapping (dict, optional): 输出键映射 {"target_key": "source_key"}
+
+        绑定后该 Agent 节点在执行时会：
+        1. 透明地调用整个子工作流（含其所有 agents）
+        2. 将子工作流的最终输出返回给父工作流继续处理
+        3. 自动检测循环引用，防止无限递归
+        """
+        from ..core.models import AgentType, AgentConfig, WorkflowReferenceConfig
+
+        manager = get_workflow_manager()
+        workflow = await manager.get_workflow(workflow_id)
+        if not workflow:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+
+        node = workflow.get_agent(agent_id)
+        if not node:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        sub_workflow_id = body.get("sub_workflow_id")
+        if not sub_workflow_id:
+            raise HTTPException(status_code=400, detail="sub_workflow_id is required")
+
+        # 防止自引用
+        if sub_workflow_id == workflow_id:
+            raise HTTPException(
+                status_code=400,
+                detail="A workflow cannot reference itself (direct self-loop)",
+            )
+
+        # 验证子工作流存在
+        sub_workflow = await manager.get_workflow(sub_workflow_id)
+        if not sub_workflow:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Sub-workflow '{sub_workflow_id}' not found",
+            )
+
+        # 更新 Agent 节点类型和配置
+        node.type = AgentType.WORKFLOW
+        if node.config is None:
+            node.config = AgentConfig()
+
+        node.config.workflow_config = WorkflowReferenceConfig(
+            workflow_id=sub_workflow_id,
+            input_mapping=body.get("input_mapping", {}),
+            output_mapping=body.get("output_mapping", {}),
+        )
+
+        # 清除 builtin_definition（不再作为独立 LLM agent）
+        node.config.builtin_definition = None
+
+        # 重置 executor 使其在下次运行时重新初始化（带新的适配器）
+        workflow.executor = None
+        workflow.state = WorkflowState.CREATED
+
+        await manager.save_current_state(workflow_id)
+
+        return {
+            "status": "bound",
+            "agent_id": agent_id,
+            "agent_name": node.name,
+            "sub_workflow_id": sub_workflow_id,
+            "sub_workflow_name": sub_workflow.name,
+            "input_mapping": body.get("input_mapping", {}),
+            "output_mapping": body.get("output_mapping", {}),
+        }
+
+    @app.delete(
+        "/api/workflows/{workflow_id}/agents/{agent_id}/bind-workflow",
+        summary="解除 Agent 节点的子工作流绑定",
+    )
+    async def unbind_agent_from_workflow(workflow_id: str, agent_id: str):
+        """
+        将一个 WORKFLOW 类型的 Agent 节点还原为普通 BUILTIN 节点。
+        解绑后该节点保留其名称和描述，但不再委托给子工作流。
+        """
+        from ..core.models import AgentType
+
+        manager = get_workflow_manager()
+        workflow = await manager.get_workflow(workflow_id)
+        if not workflow:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+
+        node = workflow.get_agent(agent_id)
+        if not node:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        if node.type != AgentType.WORKFLOW:
+            raise HTTPException(
+                status_code=400,
+                detail="Agent is not of WORKFLOW type (not bound to a sub-workflow)",
+            )
+
+        prev_sub_id = (
+            node.config.workflow_config.workflow_id
+            if node.config and node.config.workflow_config
+            else None
+        )
+
+        # 还原为 builtin，清除 workflow_config
+        node.type = AgentType.BUILTIN
+        if node.config:
+            node.config.workflow_config = None
+
+        workflow.executor = None
+        workflow.state = WorkflowState.CREATED
+
+        await manager.save_current_state(workflow_id)
+
+        return {
+            "status": "unbound",
+            "agent_id": agent_id,
+            "agent_name": node.name,
+            "previous_sub_workflow_id": prev_sub_id,
+        }
+
+    @app.get(
+        "/api/workflows/{workflow_id}/agents/{agent_id}/bind-workflow",
+        summary="查看 Agent 节点当前绑定的子工作流",
+    )
+    async def get_agent_workflow_binding(workflow_id: str, agent_id: str):
+        """获取一个 Agent 节点当前绑定的子工作流信息。"""
+        from ..core.models import AgentType
+
+        manager = get_workflow_manager()
+        workflow = await manager.get_workflow(workflow_id)
+        if not workflow:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+
+        node = workflow.get_agent(agent_id)
+        if not node:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        if node.type != AgentType.WORKFLOW or not (
+            node.config and node.config.workflow_config
+        ):
+            return {"bound": False, "agent_id": agent_id, "type": node.type.value}
+
+        wf_cfg = node.config.workflow_config
+        sub_wf = await manager.get_workflow(wf_cfg.workflow_id)
+
+        return {
+            "bound": True,
+            "agent_id": agent_id,
+            "agent_name": node.name,
+            "sub_workflow_id": wf_cfg.workflow_id,
+            "sub_workflow_name": sub_wf.name if sub_wf else None,
+            "sub_workflow_description": sub_wf.description if sub_wf else None,
+            "input_mapping": wf_cfg.input_mapping,
+            "output_mapping": wf_cfg.output_mapping,
+        }
+
+    @app.get(
+        "/api/workflows/{workflow_id}/tree",
+        summary="获取工作流完整嵌套树结构（递归展开所有子工作流）",
+    )
+    async def get_workflow_full_tree(workflow_id: str, max_depth: int = 5):
+        """
+        递归展开工作流的完整嵌套树结构，包含所有子工作流节点。
+
+        每个 WORKFLOW 类型的 Agent 节点都会附带 sub_workflow 字段，
+        其中包含子工作流的完整结构（继续递归）。
+
+        参数：
+        - max_depth: 最大递归深度，默认 5，防止超深结构导致响应过慢
+
+        返回示例：
+        {
+          "id": "wf-A", "name": "旅游助手",
+          "agents": [
+            {"id": "...", "name": "行程规划", "type": "builtin"},
+            {
+              "id": "...", "name": "酒店预订", "type": "workflow",
+              "sub_workflow_id": "wf-B",
+              "sub_workflow": {
+                "id": "wf-B", "name": "酒店工作流",
+                "agents": [ ... ]
+              }
+            }
+          ]
+        }
+        """
+        manager = get_workflow_manager()
+
+        async def build_tree(wf_id: str, depth: int, visited: set) -> Dict[str, Any]:
+            if wf_id in visited:
+                return {
+                    "id": wf_id,
+                    "truncated": True,
+                    "reason": "circular_reference",
+                }
+            if depth > max_depth:
+                return {
+                    "id": wf_id,
+                    "truncated": True,
+                    "reason": f"max_depth ({max_depth}) exceeded",
+                }
+
+            visited = visited | {wf_id}
+            wf = await manager.get_workflow(wf_id)
+            if not wf:
+                return {"id": wf_id, "error": "workflow not found"}
+
+            agents = []
+            for node in wf.tree:
+                agent_info: Dict[str, Any] = {
+                    "id": node.id,
+                    "name": node.name,
+                    "description": node.description,
+                    "type": node.type.value,
+                    "parent_id": node.parent_id,
+                    "children": node.children,
+                    "routing_strategy": node.routing_strategy.value,
+                    "enabled": node.enabled,
+                }
+                # WORKFLOW 节点递归展开
+                from ..core.models import AgentType
+                if (
+                    node.type == AgentType.WORKFLOW
+                    and node.config
+                    and node.config.workflow_config
+                    and node.config.workflow_config.workflow_id
+                ):
+                    sub_id = node.config.workflow_config.workflow_id
+                    agent_info["sub_workflow_id"] = sub_id
+                    agent_info["input_mapping"] = node.config.workflow_config.input_mapping
+                    agent_info["output_mapping"] = node.config.workflow_config.output_mapping
+                    agent_info["sub_workflow"] = await build_tree(
+                        sub_id, depth + 1, visited
+                    )
+                agents.append(agent_info)
+
+            return {
+                "id": wf.id,
+                "name": wf.name,
+                "description": wf.description,
+                "state": wf.state.value,
+                "agent_count": len(agents),
+                "agents": agents,
+            }
+
+        return await build_tree(workflow_id, depth=0, visited=set())
 
     # ============== Plugin Endpoints ==============
 
@@ -1727,6 +1999,245 @@ def create_app() -> FastAPI:
             "error": result.error,
             "duration_ms": result.duration_ms,
         }
+
+    # ============== Super Portal Endpoints ==============
+
+    class CreatePortalRequest(BaseModel):
+        """Request to create a Super Portal."""
+        name: str
+        description: str = ""
+        workflow_ids: List[str] = Field(default_factory=list)
+        provider: str = "openai"
+        model: str = "gpt-4"
+        api_key: Optional[str] = None
+        base_url: Optional[str] = None
+
+    class PortalChatRequest(BaseModel):
+        """Request to chat with a Super Portal."""
+        session_id: str
+        message: str
+        user_id: str = "default"
+        stream: bool = True
+
+    @app.post("/api/portals", summary="创建超级入口")
+    async def create_portal(request: CreatePortalRequest):
+        """
+        创建超级入口，将多个已发布工作流聚合为一个智能统一入口。
+
+        超级入口具备：
+        - 需求理解：自动拆解用户意图，路由到合适的工作流
+        - 长期记忆：跨会话记住用户偏好和关键信息
+        - 历史会话：支持多轮对话上下文
+        - 结果综合：将多个工作流结果整合为连贯回复
+        """
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        config = await mgr.create_portal(
+            name=request.name,
+            description=request.description,
+            workflow_ids=request.workflow_ids,
+            provider=request.provider,
+            model=request.model,
+            api_key=request.api_key,
+            base_url=request.base_url,
+        )
+        return config.model_dump()
+
+    @app.get("/api/portals", summary="列出所有超级入口")
+    async def list_portals():
+        """列出所有超级入口及其配置。"""
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        portals = await mgr.list_portals()
+        return [p.model_dump() for p in portals]
+
+    @app.get("/api/portals/{portal_id}", summary="获取超级入口详情")
+    async def get_portal(portal_id: str):
+        """获取指定超级入口的完整配置。"""
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        config = await mgr.get_portal(portal_id)
+        if not config:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        return config.model_dump()
+
+    @app.put("/api/portals/{portal_id}", summary="更新超级入口配置")
+    async def update_portal(portal_id: str, updates: Dict[str, Any]):
+        """
+        更新超级入口配置。
+
+        可更新字段：name, description, workflow_ids, provider, model,
+        api_key, base_url, memory_enabled, max_memory_entries, public
+        """
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        config = await mgr.update_portal(portal_id, updates)
+        if not config:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        return config.model_dump()
+
+    @app.delete("/api/portals/{portal_id}", summary="删除超级入口")
+    async def delete_portal(portal_id: str):
+        """删除超级入口（不影响绑定的工作流）。"""
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        ok = await mgr.delete_portal(portal_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        return {"status": "deleted", "id": portal_id}
+
+    @app.post("/api/portals/{portal_id}/sessions", summary="创建超级入口会话")
+    async def create_portal_session(portal_id: str, body: Dict[str, Any] = {}):
+        """
+        创建新的对话会话。
+
+        建议在开始与超级入口对话前调用此接口，获取 session_id 后用于后续对话。
+        """
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        svc = await mgr.get_service(portal_id)
+        if not svc:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        session = await svc.create_session(
+            user_id=body.get("user_id", "default"),
+            metadata=body.get("metadata"),
+        )
+        return {"session_id": session.session_id, "portal_id": portal_id}
+
+    @app.get("/api/portals/{portal_id}/sessions/{session_id}", summary="获取会话历史")
+    async def get_portal_session(portal_id: str, session_id: str):
+        """获取指定会话的完整对话历史。"""
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        svc = await mgr.get_service(portal_id)
+        if not svc:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        session = await svc.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return session.model_dump()
+
+    @app.post("/api/portals/{portal_id}/chat", summary="与超级入口对话（SSE流）")
+    async def portal_chat(portal_id: str, request: PortalChatRequest):
+        """
+        向超级入口发送消息，支持 SSE 流式响应。
+
+        事件类型（type 字段）：
+        - intent_understood: 意图解析完成，包含将调用的工作流列表
+        - workflow_dispatch_start: 开始调用某个工作流
+        - workflow_dispatch_result: 工作流返回结果
+        - synthesis_start: 开始综合最终回答
+        - content: 流式文本内容（delta 字段）
+        - memory_updated: 记忆已更新
+        - complete: 本轮对话完成
+        - error: 发生错误
+        """
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        svc = await mgr.get_service(portal_id)
+        if not svc:
+            raise HTTPException(status_code=404, detail="Portal not found")
+
+        if request.stream:
+            async def generate():
+                async for event in svc.chat(
+                    session_id=request.session_id,
+                    user_message=request.message,
+                    user_id=request.user_id,
+                    stream=True,
+                ):
+                    data = event.model_dump(exclude_none=True)
+                    if "timestamp" in data:
+                        data["timestamp"] = data["timestamp"].isoformat()
+                    yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                generate(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        else:
+            events = []
+            content_parts = []
+            async for event in svc.chat(
+                session_id=request.session_id,
+                user_message=request.message,
+                user_id=request.user_id,
+                stream=False,
+            ):
+                d = event.model_dump(exclude_none=True)
+                if "timestamp" in d:
+                    d["timestamp"] = d["timestamp"].isoformat()
+                events.append(d)
+                if event.delta:
+                    content_parts.append(event.delta)
+            return {
+                "content": "".join(content_parts),
+                "events": events,
+            }
+
+    @app.post(
+        "/api/portals/access/{access_key}/chat",
+        summary="通过 API Key 访问超级入口（对外公开接口）",
+    )
+    async def portal_chat_by_key(access_key: str, request: PortalChatRequest):
+        """
+        使用超级入口的访问密钥（api_key_access）直接对话，
+        适合对外发布后的第三方调用场景。
+        """
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        config = await mgr.get_by_access_key(access_key)
+        if not config:
+            raise HTTPException(status_code=404, detail="Portal not found or invalid key")
+        return await portal_chat(config.id, request)
+
+    @app.get("/api/portals/{portal_id}/memories", summary="查看用户记忆")
+    async def get_portal_memories(
+        portal_id: str,
+        user_id: str = "default",
+        query: str = "",
+        top_k: int = 20,
+    ):
+        """
+        查看超级入口为指定用户积累的长期记忆。
+
+        支持通过 query 做关键词语义检索，返回最相关的 top_k 条。
+        """
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        svc = await mgr.get_service(portal_id)
+        if not svc:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        memories = await svc.get_memories(user_id=user_id, query=query, top_k=top_k)
+        return [m.model_dump() for m in memories]
+
+    @app.delete("/api/portals/{portal_id}/memories/{entry_id}", summary="删除单条记忆")
+    async def delete_portal_memory(portal_id: str, entry_id: str):
+        """删除指定的记忆条目。"""
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        svc = await mgr.get_service(portal_id)
+        if not svc:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        ok = await svc.delete_memory(entry_id)
+        return {"deleted": ok, "entry_id": entry_id}
+
+    @app.delete("/api/portals/{portal_id}/memories", summary="清空用户所有记忆")
+    async def clear_portal_memories(portal_id: str, user_id: str = "default"):
+        """清空指定用户在此超级入口的所有长期记忆。"""
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        svc = await mgr.get_service(portal_id)
+        if not svc:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        count = await svc.clear_memories(user_id=user_id)
+        return {"cleared": count, "user_id": user_id}
 
     return app
 

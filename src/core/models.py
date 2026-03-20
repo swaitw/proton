@@ -30,6 +30,7 @@ class RoutingStrategy(str, Enum):
     ROUND_ROBIN = "round_robin"        # Distribute evenly
     LOAD_BALANCED = "load_balanced"    # Based on agent load
     COORDINATOR = "coordinator"        # Coordinator pattern: parent → children → parent integrates
+    INTENT = "intent"                  # LLM-based intent understanding → dynamic child selection
 
 
 class ExecutionMode(str, Enum):
@@ -186,6 +187,42 @@ class OutputFormat(BaseModel):
     json_schema: Optional[Dict[str, Any]] = None  # For json format
     structured_fields: Optional[List[Dict[str, Any]]] = None  # For structured format
     example: Optional[str] = None
+
+
+# ============== Intent Routing Configuration ==============
+
+class IntentRoutingConfig(BaseModel):
+    """
+    Configuration for the INTENT routing strategy.
+
+    When a node uses routing_strategy=INTENT, this config controls
+    how the LLM-based intent understanding works.
+
+    The intent router:
+    1. Reads the current user query from context
+    2. Inspects all enabled child nodes (name + description)
+    3. Uses an LLM to decide which children to call and with what refined sub-query
+    4. Executes selected children (parallel if same priority, sequential otherwise)
+    5. Optionally synthesises results back into a single response
+
+    This replaces the Portal-only IntentUnderstandingService and makes
+    intent-based routing available at ANY level of the tree.
+    """
+    # LLM provider settings (inherits from parent AgentConfig if not set)
+    provider: str = "openai"
+    model: str = "gpt-4"
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    temperature: float = 0.2
+
+    # Routing behaviour
+    allow_parallel: bool = True          # Allow same-priority children to run in parallel
+    synthesise_results: bool = True      # After children run, call this node again to synthesise
+    fallback_to_all: bool = True         # If intent LLM fails, call all children
+    max_children_selected: int = 0       # 0 = no limit; N = select at most N children
+
+    # Synthesis prompt override (None = use built-in default)
+    synthesis_system_prompt: Optional[str] = None
 
 
 # ============== Built-in Agent Definition ==============
@@ -385,6 +422,9 @@ class AgentConfig(BaseModel):
     # Built-in agent definition (for visual editing)
     builtin_definition: Optional[BuiltinAgentDefinition] = None
 
+    # Intent routing config — used when routing_strategy == INTENT
+    intent_routing_config: Optional[IntentRoutingConfig] = None
+
     # Plugins
     mcp_servers: List[MCPServerConfig] = Field(default_factory=list)
     skills: List[SkillConfig] = Field(default_factory=list)
@@ -442,7 +482,7 @@ class AgentResponse(BaseModel):
     tool_calls: List[ToolCall] = Field(default_factory=list)
     tool_results: List[ToolResult] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    usage: Optional[Dict[str, int]] = None
+    usage: Optional[Dict[int, int]] = None
     response_id: str = ""
 
 
@@ -468,6 +508,7 @@ class ExecutionEventType(str, Enum):
     NODE_COMPLETE = "node_complete"
     NODE_ERROR = "node_error"
     ROUTING_START = "routing_start"
+    INTENT_ROUTING = "intent_routing"      # Emitted when intent routing runs
 
 
 class ExecutionEvent(BaseModel):
@@ -572,4 +613,138 @@ class CopilotEvent(BaseModel):
     result: Optional[Dict[str, Any]] = None     # For tool_result
     workflow_id: Optional[str] = None     # For workflow events
     error: Optional[str] = None           # For error events
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+
+# ============== Super Portal Models ==============
+
+class PortalMemoryEntry(BaseModel):
+    """A single memory entry in the portal's long-term memory."""
+    id: str
+    portal_id: str
+    user_id: str = "default"
+    content: str                          # Memory content (fact/preference/context)
+    memory_type: str = "fact"             # fact, preference, context, summary
+    importance: float = 0.5              # 0.0 - 1.0, used for pruning
+    source_session_id: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.now)
+    last_accessed: datetime = Field(default_factory=datetime.now)
+    access_count: int = 0
+
+
+class PortalConversationMessage(BaseModel):
+    """A message in a portal conversation session."""
+    role: str                             # user / assistant / system / tool
+    content: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    # Which workflows were dispatched for this turn
+    dispatched_workflows: List[str] = Field(default_factory=list)
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class PortalSession(BaseModel):
+    """
+    A conversation session with the Super Portal.
+
+    Maintains multi-turn context and per-session history.
+    """
+    session_id: str
+    portal_id: str
+    user_id: str = "default"
+    messages: List[PortalConversationMessage] = Field(default_factory=list)
+    active: bool = True
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkflowDispatchPlan(BaseModel):
+    """
+    Result of intent understanding: which child nodes to call and with what input.
+    Used both by Portal (dispatching workflows) and by INTENT routing (dispatching child agents).
+    """
+    workflow_id: str                      # child agent_id or workflow_id
+    workflow_name: str                    # display name
+    sub_query: str                        # Refined query tailored for this child
+    reason: str                           # Why this child was selected
+    priority: int = 0                    # Execution order; same value = parallel
+
+
+class IntentUnderstandingResult(BaseModel):
+    """
+    Structured result from the intent understanding capability.
+    """
+    original_query: str
+    understood_intent: str                # Human-readable summary of what user wants
+    dispatch_plans: List[WorkflowDispatchPlan]
+    clarification_needed: bool = False
+    clarification_question: Optional[str] = None
+    memories_used: List[str] = Field(default_factory=list)  # Memory IDs that influenced this
+
+
+class SuperPortalConfig(BaseModel):
+    """
+    Configuration for a Super Portal.
+
+    A Super Portal bundles multiple published workflows under one
+    intelligent entry point that understands user intent and routes
+    to the appropriate workflows.
+    """
+    id: str
+    name: str
+    description: str = ""
+
+    # Bound workflow IDs (must all be published)
+    workflow_ids: List[str] = Field(default_factory=list)
+
+    # LLM config for intent understanding & response synthesis
+    provider: str = "openai"
+    model: str = "gpt-4"
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    temperature: float = 0.3
+
+    # Memory settings
+    memory_enabled: bool = True
+    max_memory_entries: int = 100         # Per user
+    memory_importance_threshold: float = 0.3   # Entries below this are pruned first
+
+    # Session settings
+    max_session_messages: int = 50        # Keep last N messages per session
+    session_ttl_hours: int = 24           # Inactive session expiry
+
+    # Access control
+    api_key_access: Optional[str] = None  # Portal-level API key
+    public: bool = False                  # Allow access without api_key
+
+    # Metadata
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class PortalEventType(str, Enum):
+    """Event types streamed from the Super Portal."""
+    INTENT_UNDERSTOOD = "intent_understood"         # Intent analysis complete
+    WORKFLOW_DISPATCH_START = "workflow_dispatch_start"  # Starting a workflow
+    WORKFLOW_DISPATCH_RESULT = "workflow_dispatch_result"  # Workflow returned result
+    SYNTHESIS_START = "synthesis_start"             # Starting final answer synthesis
+    CONTENT = "content"                             # Streaming content delta
+    MEMORY_UPDATED = "memory_updated"               # Memory was updated
+    COMPLETE = "complete"                           # Turn complete
+    ERROR = "error"
+
+
+class PortalEvent(BaseModel):
+    """Event emitted during Super Portal conversation."""
+    type: PortalEventType
+    session_id: str
+    portal_id: str
+    delta: Optional[str] = None
+    intent: Optional[IntentUnderstandingResult] = None
+    workflow_id: Optional[str] = None
+    workflow_name: Optional[str] = None
+    workflow_result: Optional[str] = None
+    memory_entry: Optional[PortalMemoryEntry] = None
+    error: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.now)

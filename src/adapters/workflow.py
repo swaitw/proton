@@ -2,14 +2,24 @@
 Adapter for executing workflows as sub-agents.
 
 Allows workflows to reference and call other workflows,
-enabling workflow composition and reuse.
+enabling workflow composition and reuse — unlimited nesting depth.
+
+Design:
+  - A node with type=WORKFLOW and config.workflow_config.workflow_id
+    delegates ALL execution to the referenced workflow.
+  - Cycle detection uses workflow_ids tracked in the CallChain.
+  - The referenced workflow is lazily initialised on first run so that
+    it picks up any agents added after the parent workflow was started.
+  - Input / output mapping lets the caller rename context keys across
+    workflow boundaries.
 """
 
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, List
 
-from .base import AgentAdapter
+from .base import AgentAdapter, AdapterFactory
 from ..core.models import (
+    AgentType,
     AgentResponse,
     AgentResponseUpdate,
     AgentCapabilities,
@@ -24,54 +34,48 @@ logger = logging.getLogger(__name__)
 
 class WorkflowAdapter(AgentAdapter):
     """
-    Adapter that executes a referenced workflow as a sub-node.
+    Adapter that executes a referenced workflow as a single agent node.
 
-    This allows workflows to call other workflows, enabling:
-    - Workflow composition and reuse
-    - Modular workflow design
-    - Hierarchical workflow structures
+    This is what powers unlimited tree nesting: any AgentNode whose
+    type is WORKFLOW will be transparently replaced by the full
+    execution of another workflow when the tree executor invokes it.
     """
 
     def __init__(self, node: AgentNode):
-        """
-        Initialize the workflow adapter.
-
-        Args:
-            node: The AgentNode with workflow_config specifying the referenced workflow
-        """
         super().__init__(node)
-        self.referenced_workflow = None
         self._workflow_manager = None
+        # The referenced workflow object (loaded lazily)
+        self._referenced_workflow = None
+
+    # ------------------------------------------------------------------
+    # AgentAdapter interface
+    # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
         """
-        Initialize the adapter by loading the referenced workflow.
+        Validate config and import the workflow manager.
 
-        Raises:
-            ValueError: If workflow config is missing or workflow not found
+        We do NOT call workflow.initialize() here because the referenced
+        workflow may not have all its agents yet (it's lazy).
         """
         config = self.node.config
         if not config or not config.workflow_config:
             raise ValueError(
-                f"Workflow config required for agent {self.node.id}"
+                f"Node '{self.node.id}' is type WORKFLOW but has no workflow_config."
             )
 
         workflow_id = config.workflow_config.workflow_id
-
-        # Import here to avoid circular dependency
-        from ..orchestration.workflow import get_workflow_manager
-
-        self._workflow_manager = get_workflow_manager()
-        self.referenced_workflow = await self._workflow_manager.get_workflow(workflow_id)
-
-        if not self.referenced_workflow:
+        if not workflow_id:
             raise ValueError(
-                f"Referenced workflow not found: {workflow_id}"
+                f"Node '{self.node.id}' workflow_config.workflow_id is empty."
             )
 
+        from ..orchestration.workflow import get_workflow_manager
+        self._workflow_manager = get_workflow_manager()
+
         logger.info(
-            f"WorkflowAdapter initialized for {self.node.id}, "
-            f"referencing workflow {workflow_id}"
+            f"[WorkflowAdapter] Node '{self.node.id}' ({self.node.name}) "
+            f"→ sub-workflow '{workflow_id}'"
         )
         self._initialized = True
 
@@ -81,80 +85,64 @@ class WorkflowAdapter(AgentAdapter):
         context: ExecutionContext,
         **kwargs: Any,
     ) -> AgentResponse:
-        """
-        Execute the referenced workflow.
-
-        Args:
-            messages: The conversation history
-            context: The execution context
-            **kwargs: Additional arguments
-
-        Returns:
-            AgentResponse with the workflow's output
-
-        Raises:
-            CycleDetectedError: If circular workflow reference detected
-        """
         self._ensure_initialized()
 
         workflow_id = self.node.config.workflow_config.workflow_id
 
-        # Check for circular reference
-        if self._has_circular_reference(context, workflow_id):
-            raise CycleDetectedError(
-                f"Circular workflow reference detected: {workflow_id} "
-                f"is already in the call chain"
+        # --- Cycle guard ---
+        if workflow_id in context.call_chain.get_workflow_ids():
+            msg = (
+                f"[WorkflowAdapter] Circular workflow reference detected: "
+                f"'{workflow_id}' is already in the call chain."
             )
+            logger.warning(msg)
+            raise CycleDetectedError(msg)
 
-        # Get input message
-        input_message = messages[-1].content if messages else ""
+        # --- Resolve input ---
+        input_message = self._resolve_input(messages, context)
 
-        # Apply input mapping if configured
-        mapped_input = self._apply_input_mapping(input_message, context)
-
-        # Add workflow to tracking
+        # --- Mark workflow in chain ---
         context.call_chain.add_workflow(workflow_id)
 
+        # --- Lazy-load & ensure initialised ---
+        workflow = await self._ensure_workflow(workflow_id)
+        if not workflow:
+            return self._error_response(
+                f"Sub-workflow '{workflow_id}' not found.",
+                workflow_id,
+            )
+
+        # --- Execute ---
         try:
-            # Execute the referenced workflow
-            result = await self.referenced_workflow.run(mapped_input, context)
-
-            # Build response from workflow result
-            if result.response:
-                output_messages = result.response.messages
-            else:
-                # Handle error or empty response
-                error_msg = result.error or "Workflow returned no response"
-                output_messages = [
-                    ChatMessage(
-                        role=MessageRole.ASSISTANT,
-                        content=f"[Workflow Error] {error_msg}"
-                    )
-                ]
-
-            # Apply output mapping
-            response = AgentResponse(
-                messages=output_messages,
-                metadata={
-                    "workflow_id": workflow_id,
-                    "execution_id": result.execution_id,
-                    "duration_ms": result.duration_ms,
-                }
+            result = await workflow.run(input_message, context)
+        except Exception as exc:
+            logger.error(
+                f"[WorkflowAdapter] Sub-workflow '{workflow_id}' raised: {exc}"
             )
+            return self._error_response(str(exc), workflow_id)
 
-            return self._apply_output_mapping(response, context)
+        # --- Build response ---
+        if result.error:
+            return self._error_response(result.error, workflow_id)
 
-        except Exception as e:
-            logger.error(f"Error executing workflow {workflow_id}: {e}")
-            return AgentResponse(
-                messages=[
-                    ChatMessage(
-                        role=MessageRole.ASSISTANT,
-                        content=f"[Workflow Execution Error] {str(e)}"
-                    )
-                ],
-                metadata={"error": str(e), "workflow_id": workflow_id}
-            )
+        output_messages = (
+            result.response.messages
+            if result.response
+            else [ChatMessage(
+                role=MessageRole.ASSISTANT,
+                content="(sub-workflow returned no content)",
+            )]
+        )
+
+        response = AgentResponse(
+            messages=output_messages,
+            metadata={
+                "sub_workflow_id": workflow_id,
+                "execution_id": result.execution_id,
+                "duration_ms": result.duration_ms,
+            },
+        )
+        return self._apply_output_mapping(response, context)
 
     async def run_stream(
         self,
@@ -162,48 +150,40 @@ class WorkflowAdapter(AgentAdapter):
         context: ExecutionContext,
         **kwargs: Any,
     ) -> AsyncIterator[AgentResponseUpdate]:
-        """
-        Execute the referenced workflow with streaming output.
-
-        Args:
-            messages: The conversation history
-            context: The execution context
-            **kwargs: Additional arguments
-
-        Yields:
-            AgentResponseUpdate objects as the response is generated
-        """
         self._ensure_initialized()
 
         workflow_id = self.node.config.workflow_config.workflow_id
 
-        # Check for circular reference
-        if self._has_circular_reference(context, workflow_id):
+        if workflow_id in context.call_chain.get_workflow_ids():
             yield AgentResponseUpdate(
-                delta_content=f"[Error] Circular workflow reference: {workflow_id}",
+                delta_content=(
+                    f"[Error] Circular sub-workflow reference: '{workflow_id}'"
+                ),
                 is_complete=True,
             )
             return
 
-        # Get input message
-        input_message = messages[-1].content if messages else ""
-        mapped_input = self._apply_input_mapping(input_message, context)
-
-        # Add workflow to tracking
+        input_message = self._resolve_input(messages, context)
         context.call_chain.add_workflow(workflow_id)
 
-        try:
-            async for update in self.referenced_workflow.run_stream(mapped_input, context):
-                yield update
-        except Exception as e:
-            logger.error(f"Error streaming workflow {workflow_id}: {e}")
+        workflow = await self._ensure_workflow(workflow_id)
+        if not workflow:
             yield AgentResponseUpdate(
-                delta_content=f"[Workflow Error] {str(e)}",
+                delta_content=f"[Error] Sub-workflow '{workflow_id}' not found.",
+                is_complete=True,
+            )
+            return
+
+        try:
+            async for update in workflow.run_stream(input_message, context):
+                yield update
+        except Exception as exc:
+            yield AgentResponseUpdate(
+                delta_content=f"[Sub-workflow Error] {exc}",
                 is_complete=True,
             )
 
     def get_capabilities(self) -> AgentCapabilities:
-        """Get the capabilities of this adapter."""
         return AgentCapabilities(
             supports_streaming=True,
             supports_tools=True,
@@ -214,83 +194,95 @@ class WorkflowAdapter(AgentAdapter):
         )
 
     async def cleanup(self) -> None:
-        """Clean up resources."""
-        self.referenced_workflow = None
+        self._referenced_workflow = None
         self._workflow_manager = None
 
-    def _has_circular_reference(
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    async def _ensure_workflow(self, workflow_id: str):
+        """Load and (if needed) initialise the referenced workflow."""
+        if (
+            self._referenced_workflow is not None
+            and self._referenced_workflow.id == workflow_id
+        ):
+            wf = self._referenced_workflow
+        else:
+            wf = await self._workflow_manager.get_workflow(workflow_id)
+            if wf is None:
+                return None
+            self._referenced_workflow = wf
+
+        # Ensure the sub-workflow is initialised (idempotent)
+        from ..orchestration.workflow import WorkflowState
+        if wf.state in (WorkflowState.CREATED,) or wf.executor is None:
+            try:
+                await wf.initialize()
+            except Exception as exc:
+                logger.error(
+                    f"[WorkflowAdapter] Failed to initialise sub-workflow "
+                    f"'{workflow_id}': {exc}"
+                )
+                return None
+
+        return wf
+
+    def _resolve_input(
         self,
+        messages: List[ChatMessage],
         context: ExecutionContext,
-        workflow_id: str
-    ) -> bool:
-        """
-        Check if this workflow is already in the call chain.
-
-        Args:
-            context: The execution context
-            workflow_id: The workflow ID to check
-
-        Returns:
-            True if circular reference detected
-        """
-        return workflow_id in context.call_chain.get_workflow_ids()
-
-    def _apply_input_mapping(
-        self,
-        input_message: str,
-        context: ExecutionContext
     ) -> str:
-        """
-        Apply input mapping to transform parent context to child input.
+        """Extract the input string, applying input_mapping if set."""
+        base = messages[-1].content if messages else ""
+        mapping = (
+            self.node.config.workflow_config.input_mapping
+            if self.node.config and self.node.config.workflow_config
+            else {}
+        )
+        if not mapping:
+            return base
 
-        Args:
-            input_message: The original input message
-            context: The execution context
-
-        Returns:
-            Transformed input message
-        """
-        config = self.node.config.workflow_config
-        if not config.input_mapping:
-            return input_message
-
-        # Apply input mappings from shared state
-        mapped_parts = [input_message]
-        for target_key, source_key in config.input_mapping.items():
+        extra_parts = []
+        for target_key, source_key in mapping.items():
             if source_key in context.shared_state:
-                value = context.shared_state[source_key]
-                mapped_parts.append(f"\n[{target_key}]: {value}")
-
-        return "".join(mapped_parts)
+                extra_parts.append(
+                    f"[{target_key}]: {context.shared_state[source_key]}"
+                )
+        return base + ("\n" + "\n".join(extra_parts) if extra_parts else "")
 
     def _apply_output_mapping(
         self,
         response: AgentResponse,
-        context: ExecutionContext
+        context: ExecutionContext,
     ) -> AgentResponse:
-        """
-        Apply output mapping to transform child output to parent context.
-
-        Args:
-            response: The workflow response
-            context: The execution context
-
-        Returns:
-            Potentially modified response with mapped outputs
-        """
-        config = self.node.config.workflow_config
-        if not config.output_mapping:
+        """Store mapped output keys into shared_state."""
+        mapping = (
+            self.node.config.workflow_config.output_mapping
+            if self.node.config and self.node.config.workflow_config
+            else {}
+        )
+        if not mapping:
             return response
-
-        # Store mapped outputs in shared state
-        for target_key, source_key in config.output_mapping.items():
-            # Try to extract from response content
-            if response.messages:
-                content = response.messages[-1].content
-                context.shared_state[target_key] = content
-
-            # Also check metadata
+        for target_key, source_key in mapping.items():
             if source_key in response.metadata:
                 context.shared_state[target_key] = response.metadata[source_key]
-
+            elif response.messages:
+                context.shared_state[target_key] = response.messages[-1].content
         return response
+
+    @staticmethod
+    def _error_response(message: str, workflow_id: str) -> AgentResponse:
+        return AgentResponse(
+            messages=[
+                ChatMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=f"[Sub-workflow Error] {message}",
+                )
+            ],
+            metadata={"error": message, "sub_workflow_id": workflow_id},
+        )
+
+
+# Auto-register when this module is imported
+AdapterFactory.register(AgentType.WORKFLOW, WorkflowAdapter)

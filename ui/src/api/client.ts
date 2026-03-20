@@ -233,7 +233,7 @@ export interface CopilotConfig {
   api_key_preview: string | null;
   available_models: string[];
   providers: string[];
-  is_workflow_level?: boolean;  // True if this is workflow-level config
+  is_workflow_level?: boolean;
 }
 
 export interface CopilotSession {
@@ -356,10 +356,6 @@ export const api = {
     return response.data;
   },
 
-  /**
-   * Run a workflow with streaming execution events via SSE.
-   * Returns an abort function to cancel the request.
-   */
   runWorkflowStream(
     workflowId: string,
     message: string,
@@ -378,14 +374,10 @@ export const api = {
           signal: abortController.signal,
         });
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 
         const reader = response.body?.getReader();
-        if (!reader) {
-          throw new Error('ReadableStream not supported');
-        }
+        if (!reader) throw new Error('ReadableStream not supported');
 
         const decoder = new TextDecoder();
         let buffer = '';
@@ -401,22 +393,11 @@ export const api = {
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed || !trimmed.startsWith('data: ')) continue;
-
             const data = trimmed.slice(6);
-            if (data === '[DONE]') {
-              onComplete?.();
-              return;
-            }
-
-            try {
-              const event: ExecutionEvent = JSON.parse(data);
-              onEvent(event);
-            } catch {
-              // Skip malformed JSON lines
-            }
+            if (data === '[DONE]') { onComplete?.(); return; }
+            try { onEvent(JSON.parse(data)); } catch {}
           }
         }
-
         onComplete?.();
       } catch (err: any) {
         if (err.name === 'AbortError') return;
@@ -452,7 +433,6 @@ export const api = {
     await client.delete(`/api/workflows/${workflowId}/agents/${agentId}`);
   },
 
-  // Agent Definition (for builtin agents)
   async getAgentDefinition(workflowId: string, agentId: string): Promise<AgentDefinition> {
     const response = await client.get(`/api/workflows/${workflowId}/agents/${agentId}/definition`);
     return response.data;
@@ -470,7 +450,6 @@ export const api = {
     return response.data;
   },
 
-  // Built-in Tools
   async addTool(workflowId: string, agentId: string, tool: BuiltinTool): Promise<BuiltinTool> {
     const response = await client.post(
       `/api/workflows/${workflowId}/agents/${agentId}/tools`,
@@ -483,7 +462,6 @@ export const api = {
     await client.delete(`/api/workflows/${workflowId}/agents/${agentId}/tools/${toolName}`);
   },
 
-  // Agent Testing
   async testAgent(workflowId: string, agentId: string, message: string): Promise<TestAgentResult> {
     const response = await client.post(
       `/api/workflows/${workflowId}/agents/${agentId}/test`,
@@ -519,45 +497,29 @@ export const api = {
     return response.data;
   },
 
-  async registerMCP(data: {
-    name: string;
-    command: string;
-    args?: string[];
-    agent_id?: string;
-  }): Promise<any> {
+  async registerMCP(data: { name: string; command: string; args?: string[]; agent_id?: string }): Promise<any> {
     const response = await client.post('/api/plugins/mcp', data);
     return response.data;
   },
 
   async registerSkill(data: {
-    name: string;
-    description: string;
-    module_path: string;
-    function_name: string;
-    agent_id?: string;
+    name: string; description: string; module_path: string;
+    function_name: string; agent_id?: string;
   }): Promise<any> {
     const response = await client.post('/api/plugins/skill', data);
     return response.data;
   },
 
-  async registerRAG(data: {
-    name: string;
-    type?: string;
-    connection_string?: string;
-    agent_id?: string;
-  }): Promise<any> {
+  async registerRAG(data: { name: string; type?: string; connection_string?: string; agent_id?: string }): Promise<any> {
     const response = await client.post('/api/plugins/rag', data);
     return response.data;
   },
 
-  // Skill management endpoints
   async uploadSkill(file: File): Promise<any> {
     const formData = new FormData();
     formData.append('file', file);
     const response = await client.post('/api/skills/upload', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
+      headers: { 'Content-Type': 'multipart/form-data' },
     });
     return response.data;
   },
@@ -639,10 +601,7 @@ export const api = {
   },
 
   async updateCopilotConfig(config: {
-    provider?: string;
-    model?: string;
-    api_key?: string;
-    base_url?: string;
+    provider?: string; model?: string; api_key?: string; base_url?: string;
   }): Promise<{ status: string; config: CopilotConfig }> {
     const response = await client.post('/api/copilot/config', config);
     return response.data;
@@ -653,15 +612,9 @@ export const api = {
     return response.data;
   },
 
-  async updateWorkflowCopilotConfig(
-    workflowId: string,
-    config: {
-      provider?: string;
-      model?: string;
-      api_key?: string;
-      base_url?: string;
-    }
-  ): Promise<{ status: string; config: CopilotConfig }> {
+  async updateWorkflowCopilotConfig(workflowId: string, config: {
+    provider?: string; model?: string; api_key?: string; base_url?: string;
+  }): Promise<{ status: string; config: CopilotConfig }> {
     const response = await client.post(`/api/workflows/${workflowId}/copilot/config`, config);
     return response.data;
   },
@@ -679,13 +632,8 @@ export const api = {
   },
 
   async updateSearchConfig(config: {
-    provider?: string;
-    searxng_base_url?: string;
-    serper_api_key?: string;
-    brave_api_key?: string;
-    bing_api_key?: string;
-    google_api_key?: string;
-    google_cx?: string;
+    provider?: string; searxng_base_url?: string; serper_api_key?: string;
+    brave_api_key?: string; bing_api_key?: string; google_api_key?: string; google_cx?: string;
   }): Promise<{ status: string; config: SearchConfig }> {
     const response = await client.post('/api/search/config', config);
     return response.data;
@@ -706,15 +654,9 @@ export const api = {
   },
 
   async updateEmailConfig(config: {
-    preferred_method?: string;
-    resend_api_key?: string;
-    resend_from?: string;
-    smtp_host?: string;
-    smtp_port?: number;
-    smtp_user?: string;
-    smtp_password?: string;
-    smtp_from?: string;
-    smtp_use_tls?: boolean;
+    preferred_method?: string; resend_api_key?: string; resend_from?: string;
+    smtp_host?: string; smtp_port?: number; smtp_user?: string; smtp_password?: string;
+    smtp_from?: string; smtp_use_tls?: boolean;
   }): Promise<{ status: string; config: EmailConfig }> {
     const response = await client.post('/api/email/config', config);
     return response.data;
@@ -730,10 +672,6 @@ export const api = {
     return response.data;
   },
 
-  /**
-   * Chat with copilot via SSE streaming.
-   * Returns an abort function to cancel the request.
-   */
   copilotChat(
     sessionId: string,
     message: string,
@@ -752,14 +690,10 @@ export const api = {
           signal: abortController.signal,
         });
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 
         const reader = response.body?.getReader();
-        if (!reader) {
-          throw new Error('ReadableStream not supported');
-        }
+        if (!reader) throw new Error('ReadableStream not supported');
 
         const decoder = new TextDecoder();
         let buffer = '';
@@ -767,30 +701,17 @@ export const api = {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
-
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed || !trimmed.startsWith('data: ')) continue;
-
             const data = trimmed.slice(6);
-            if (data === '[DONE]') {
-              onComplete?.();
-              return;
-            }
-
-            try {
-              const event: CopilotEvent = JSON.parse(data);
-              onEvent(event);
-            } catch {
-              // Skip malformed JSON lines
-            }
+            if (data === '[DONE]') { onComplete?.(); return; }
+            try { onEvent(JSON.parse(data) as CopilotEvent); } catch {}
           }
         }
-
         onComplete?.();
       } catch (err: any) {
         if (err.name === 'AbortError') return;
@@ -803,14 +724,10 @@ export const api = {
   },
 
   async copilotChatSync(sessionId: string, message: string): Promise<{
-    content: string;
-    tool_results: any[];
-    workflow_id?: string;
+    content: string; tool_results: any[]; workflow_id?: string;
   }> {
     const response = await client.post('/api/copilot/chat', {
-      session_id: sessionId,
-      message,
-      stream: false,
+      session_id: sessionId, message, stream: false,
     });
     return response.data;
   },
@@ -835,17 +752,10 @@ export const api = {
   },
 
   async runPublishedWorkflow(apiKey: string, message: string): Promise<ExecutionResult> {
-    const response = await client.post(`/api/published/${apiKey}/run`, {
-      message,
-      stream: false,
-    });
+    const response = await client.post(`/api/published/${apiKey}/run`, { message, stream: false });
     return response.data;
   },
 
-  /**
-   * Run a published workflow with streaming via SSE.
-   * Returns an abort function to cancel the request.
-   */
   runPublishedWorkflowStream(
     apiKey: string,
     message: string,
@@ -864,14 +774,10 @@ export const api = {
           signal: abortController.signal,
         });
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 
         const reader = response.body?.getReader();
-        if (!reader) {
-          throw new Error('ReadableStream not supported');
-        }
+        if (!reader) throw new Error('ReadableStream not supported');
 
         const decoder = new TextDecoder();
         let buffer = '';
@@ -879,30 +785,17 @@ export const api = {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
-
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed || !trimmed.startsWith('data: ')) continue;
-
             const data = trimmed.slice(6);
-            if (data === '[DONE]') {
-              onComplete?.();
-              return;
-            }
-
-            try {
-              const event: ExecutionEvent = JSON.parse(data);
-              onEvent(event);
-            } catch {
-              // Skip malformed JSON lines
-            }
+            if (data === '[DONE]') { onComplete?.(); return; }
+            try { onEvent(JSON.parse(data)); } catch {}
           }
         }
-
         onComplete?.();
       } catch (err: any) {
         if (err.name === 'AbortError') return;
@@ -917,16 +810,10 @@ export const api = {
   // ============== Gateway API ==============
 
   async gatewayRoute(message: string): Promise<ExecutionResult> {
-    const response = await client.post('/api/gateway/route', {
-      message,
-      stream: false,
-    });
+    const response = await client.post('/api/gateway/route', { message, stream: false });
     return response.data;
   },
 
-  /**
-   * Route via gateway with streaming.
-   */
   gatewayRouteStream(
     message: string,
     onEvent: (event: ExecutionEvent) => void,
@@ -944,14 +831,10 @@ export const api = {
           signal: abortController.signal,
         });
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 
         const reader = response.body?.getReader();
-        if (!reader) {
-          throw new Error('ReadableStream not supported');
-        }
+        if (!reader) throw new Error('ReadableStream not supported');
 
         const decoder = new TextDecoder();
         let buffer = '';
@@ -959,30 +842,17 @@ export const api = {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
-
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed || !trimmed.startsWith('data: ')) continue;
-
             const data = trimmed.slice(6);
-            if (data === '[DONE]') {
-              onComplete?.();
-              return;
-            }
-
-            try {
-              const event: ExecutionEvent = JSON.parse(data);
-              onEvent(event);
-            } catch {
-              // Skip malformed JSON lines
-            }
+            if (data === '[DONE]') { onComplete?.(); return; }
+            try { onEvent(JSON.parse(data)); } catch {}
           }
         }
-
         onComplete?.();
       } catch (err: any) {
         if (err.name === 'AbortError') return;
@@ -992,5 +862,75 @@ export const api = {
 
     run();
     return () => abortController.abort();
+  },
+
+  // ============== Portal (Super Portal) API ==============
+
+  async listPortals(): Promise<any[]> {
+    const response = await client.get('/api/portals');
+    return response.data;
+  },
+
+  async getPortal(id: string): Promise<any> {
+    const response = await client.get(`/api/portals/${id}`);
+    return response.data;
+  },
+
+  async createPortal(data: {
+    name: string;
+    description?: string;
+    workflow_ids: string[];
+    provider?: string;
+    model?: string;
+    api_key?: string;
+    base_url?: string;
+    memory_enabled?: boolean;
+  }): Promise<any> {
+    const response = await client.post('/api/portals', data);
+    return response.data;
+  },
+
+  async updatePortal(id: string, updates: Record<string, any>): Promise<any> {
+    const response = await client.put(`/api/portals/${id}`, updates);
+    return response.data;
+  },
+
+  async deletePortal(id: string): Promise<void> {
+    await client.delete(`/api/portals/${id}`);
+  },
+
+  async createPortalSession(
+    portalId: string,
+    userId?: string
+  ): Promise<{ session_id: string; portal_id: string }> {
+    const response = await client.post(`/api/portals/${portalId}/sessions`, {
+      user_id: userId ?? 'default',
+    });
+    return response.data;
+  },
+
+  async getPortalMemories(
+    portalId: string,
+    userId?: string,
+    query?: string,
+    topK?: number
+  ): Promise<any[]> {
+    const params: any = { user_id: userId ?? 'default' };
+    if (query) params.query = query;
+    if (topK) params.top_k = topK;
+    const response = await client.get(`/api/portals/${portalId}/memories`, { params });
+    return response.data;
+  },
+
+  async deletePortalMemory(portalId: string, entryId: string): Promise<any> {
+    const response = await client.delete(`/api/portals/${portalId}/memories/${entryId}`);
+    return response.data;
+  },
+
+  async clearPortalMemories(portalId: string, userId?: string): Promise<any> {
+    const response = await client.delete(`/api/portals/${portalId}/memories`, {
+      params: { user_id: userId ?? 'default' },
+    });
+    return response.data;
   },
 };
