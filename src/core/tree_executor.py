@@ -383,8 +383,34 @@ class TreeExecutor:
                         tool_call_id=tr_data["tool_call_id"],
                         content=tr_data["content"],
                         is_error=tr_data.get("is_error", False),
+                        metadata=tr_data.get("metadata", {}),
                     )
                     tool_results.append(tr)
+                    approval_status = tr.metadata.get("approval_status")
+                    if approval_status == "pending":
+                        yield ExecutionEvent(
+                            event_type=ExecutionEventType.APPROVAL_REQUIRED,
+                            timestamp=time.time(),
+                            workflow_id=workflow_id,
+                            execution_id=execution_id,
+                            node_id=node.id,
+                            node_name=node.name,
+                            depth=depth,
+                            tool_result=tr,
+                            metadata=tr.metadata,
+                        )
+                    elif approval_status in {"approved", "denied"}:
+                        yield ExecutionEvent(
+                            event_type=ExecutionEventType.APPROVAL_RESOLVED,
+                            timestamp=time.time(),
+                            workflow_id=workflow_id,
+                            execution_id=execution_id,
+                            node_id=node.id,
+                            node_name=node.name,
+                            depth=depth,
+                            tool_result=tr,
+                            metadata=tr.metadata,
+                        )
                     yield ExecutionEvent(
                         event_type=ExecutionEventType.NODE_TOOL_RESULT,
                         timestamp=time.time(),

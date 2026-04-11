@@ -77,6 +77,8 @@ class IntentUnderstandingService:
         available_children: List[Dict[str, Any]],
         conversation_history: Optional[List[Dict[str, str]]] = None,
         memories: Optional[List[PortalMemoryEntry]] = None,
+        memory_snapshot: str = "",
+        session_retrievals: Optional[List[Dict[str, Any]]] = None,
         max_selected: int = 0,
     ) -> IntentUnderstandingResult:
         """
@@ -102,7 +104,9 @@ class IntentUnderstandingService:
         """
         children_block = self._format_children(available_children)
         memory_block = self._format_memories(memories or [])
+        bounded_memory_block = memory_snapshot.strip() or "(no bounded snapshot)"
         history_block = self._format_history(conversation_history or [])
+        session_retrieval_block = self._format_session_retrievals(session_retrievals or [])
         limit_note = (
             f"\nNOTE: Select at most {max_selected} children.\n"
             if max_selected > 0 else ""
@@ -110,7 +114,9 @@ class IntentUnderstandingService:
 
         user_content = (
             f"## Available Children (agents / workflows)\n{children_block}\n\n"
+            f"## Bounded Memory Snapshot\n{bounded_memory_block}\n\n"
             f"## User Long-term Memory\n{memory_block}\n\n"
+            f"## Session Retrieval Snippets\n{session_retrieval_block}\n\n"
             f"## Recent Conversation History\n{history_block}\n"
             f"{limit_note}"
             f"\n## Current User Message\n{user_query}\n\n"
@@ -188,6 +194,8 @@ class IntentUnderstandingService:
         available_workflows: List[Dict[str, Any]],
         conversation_history: Optional[List[Dict[str, str]]] = None,
         memories: Optional[List[PortalMemoryEntry]] = None,
+        memory_snapshot: str = "",
+        session_retrievals: Optional[List[Dict[str, Any]]] = None,
     ) -> IntentUnderstandingResult:
         """Alias for understand() — used by Portal for workflow-level routing."""
         return await self.understand(
@@ -195,6 +203,8 @@ class IntentUnderstandingService:
             available_children=available_workflows,
             conversation_history=conversation_history,
             memories=memories,
+            memory_snapshot=memory_snapshot,
+            session_retrievals=session_retrievals,
         )
 
     # ------------------------------------------------------------------ #
@@ -228,4 +238,16 @@ class IntentUnderstandingService:
             role = msg.get("role", "?")
             content = msg.get("content", "")
             lines.append(f"{role.upper()}: {content[:300]}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_session_retrievals(results: List[Dict[str, Any]]) -> str:
+        if not results:
+            return "(no related snippets)"
+        lines = []
+        for item in results[:8]:
+            sid = item.get("session_id", "?")
+            role = item.get("role", "?")
+            snippet = item.get("snippet", "")
+            lines.append(f"- session={sid} role={role}: {snippet}")
         return "\n".join(lines)

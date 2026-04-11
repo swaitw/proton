@@ -23,10 +23,13 @@ from ..core.models import (
     MessageRole,
     BuiltinAgentDefinition,
     BuiltinToolDefinition,
-    PromptTemplate,
 )
 from ..core.context import ExecutionContext
 from ..core.agent_node import AgentNode
+from ..execution import ExecutableTool, ToolExecutor
+from ..governance import ToolGovernanceSlice
+from ..plugins.registry import Tool as PluginTool, get_plugin_registry
+from ..tools.base import SystemTool
 from ..tools.registry import get_system_tool_registry
 
 logger = logging.getLogger(__name__)
@@ -106,6 +109,11 @@ class BuiltinAgentAdapter(AgentAdapter):
         self._tools_registry: Dict[str, BuiltinToolDefinition] = {}
         self._system_tool_registry = get_system_tool_registry()
         self._enabled_system_tools: List[str] = []
+        self._plugin_tools: List[PluginTool] = []
+        self._tool_executor = ToolExecutor(
+            node=self.node,
+            slices=[ToolGovernanceSlice()],
+        )
 
     async def initialize(self) -> None:
         """Initialize the built-in agent."""
@@ -151,6 +159,9 @@ class BuiltinAgentAdapter(AgentAdapter):
             self._enabled_system_tools = self._definition.system_tools
         else:
             self._enabled_system_tools = []
+
+        self._plugin_tools = get_plugin_registry().get_tools_for_agent(self.node.id)
+        self._rebuild_tool_executor()
 
         # Initialize OpenAI-compatible client
         self._openai_client = self._create_openai_client()
@@ -198,6 +209,148 @@ class BuiltinAgentAdapter(AgentAdapter):
         logger.info(f"Creating OpenAI client for {provider} with base_url: {base_url}")
         return AsyncOpenAI(**client_kwargs)
 
+    def _rebuild_tool_executor(self) -> None:
+        """Build the unified tool executor for this adapter."""
+        self._tool_executor = ToolExecutor(
+            node=self.node,
+            slices=[ToolGovernanceSlice()],
+        )
+
+        if self._definition and self._definition.builtin_tools:
+            for tool_def in self._definition.builtin_tools:
+                self._tool_executor.register_tool(
+                    ExecutableTool(
+                        name=tool_def.name,
+                        description=tool_def.description,
+                        parameters_schema=self._build_builtin_parameters_schema(tool_def),
+                        handler=self._create_builtin_tool_handler(tool_def),
+                        source="builtin",
+                        approval_required=tool_def.approval_required,
+                        metadata={"tool_type": tool_def.tool_type},
+                    )
+                )
+
+        for tool_name in self._enabled_system_tools:
+            system_tool = self._system_tool_registry.get(tool_name)
+            if system_tool is None:
+                logger.warning("Enabled system tool not found: %s", tool_name)
+                continue
+
+            self._tool_executor.register_tool(
+                ExecutableTool(
+                    name=system_tool.name,
+                    description=system_tool.description,
+                    parameters_schema=self._build_system_tool_parameters_schema(
+                        system_tool
+                    ),
+                    handler=self._create_system_tool_handler(system_tool),
+                    source="system",
+                    approval_required=system_tool.requires_approval,
+                    is_dangerous=system_tool.is_dangerous,
+                    metadata={"category": system_tool.category},
+                )
+            )
+
+        for plugin_tool in self._plugin_tools:
+            self._tool_executor.register_tool(
+                ExecutableTool(
+                    name=plugin_tool.name,
+                    description=plugin_tool.description,
+                    parameters_schema=self._normalize_parameters_schema(
+                        plugin_tool.parameters_schema
+                    ),
+                    handler=self._create_plugin_tool_handler(plugin_tool),
+                    source=plugin_tool.source or "plugin",
+                    approval_required=(
+                        plugin_tool.approval_required
+                        or bool(plugin_tool.metadata.get("approval_required"))
+                    ),
+                    is_dangerous=(
+                        plugin_tool.is_dangerous
+                        or bool(plugin_tool.metadata.get("is_dangerous"))
+                    ),
+                    metadata=plugin_tool.metadata.copy(),
+                )
+            )
+
+    def _create_builtin_tool_handler(self, tool_def: BuiltinToolDefinition):
+        async def handler(params: Dict[str, Any], _: ExecutionContext) -> str:
+            return await self._execute_tool(tool_def, params)
+
+        return handler
+
+    def _create_system_tool_handler(self, system_tool: SystemTool):
+        async def handler(params: Dict[str, Any], context: ExecutionContext) -> str:
+            return await system_tool.execute(
+                **params,
+                __agent_definition=self._definition,
+                __agent_node=self.node,
+                __execution_context=context,
+            )
+
+        return handler
+
+    def _create_plugin_tool_handler(self, plugin_tool: PluginTool):
+        async def handler(params: Dict[str, Any], _: ExecutionContext) -> Any:
+            return await plugin_tool.execute(**params)
+
+        return handler
+
+    def _build_builtin_parameters_schema(
+        self,
+        tool_def: BuiltinToolDefinition,
+    ) -> Dict[str, Any]:
+        properties = {}
+        required = []
+
+        for param in tool_def.parameters:
+            param_schema: Dict[str, Any] = {
+                "type": (
+                    param.type.value if hasattr(param.type, "value") else str(param.type)
+                ),
+                "description": param.description,
+            }
+            if param.enum:
+                param_schema["enum"] = param.enum
+            if param.default is not None:
+                param_schema["default"] = param.default
+
+            properties[param.name] = param_schema
+            if param.required:
+                required.append(param.name)
+
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        }
+
+    def _build_system_tool_parameters_schema(
+        self,
+        system_tool: SystemTool,
+    ) -> Dict[str, Any]:
+        return self._normalize_parameters_schema(
+            system_tool.to_openai_schema()["function"]["parameters"]
+        )
+
+    def _normalize_parameters_schema(
+        self,
+        schema: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if not schema:
+            return {"type": "object", "properties": {}}
+        if schema.get("type") == "object":
+            normalized = dict(schema)
+            normalized.setdefault("properties", {})
+            normalized.setdefault("required", [])
+            return normalized
+        return {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": True,
+        }
+
     async def run(
         self,
         messages: List[ChatMessage],
@@ -214,7 +367,7 @@ class BuiltinAgentAdapter(AgentAdapter):
         tools = self._get_tools_for_api()
 
         if self._openai_client is None:
-            return self._create_fallback_response(messages)
+            return self._create_fallback_response()
 
         try:
             # Convert to OpenAI format
@@ -341,7 +494,6 @@ class BuiltinAgentAdapter(AgentAdapter):
         max_tool_rounds = 5
 
         try:
-            agent_response = None
             for round_num in range(max_tool_rounds):
                 # Build request
                 request_kwargs = {
@@ -401,7 +553,7 @@ class BuiltinAgentAdapter(AgentAdapter):
                     return
 
                 # Convert accumulated tool calls
-                from ..core.models import ToolCall, ToolResult
+                from ..core.models import ToolCall
                 tool_calls = []
                 for tc_data in tool_calls_delta.values():
                     try:
@@ -424,66 +576,18 @@ class BuiltinAgentAdapter(AgentAdapter):
                     )
 
                 # Execute tools
-                tool_results = []
-                for tool_call in tool_calls:
-                    # Check custom tools first
-                    tool_def = self._tools_registry.get(tool_call.name)
-                    if tool_def:
-                        result = await self._execute_tool(tool_def, tool_call.arguments)
-                        tool_results.append(ToolResult(
-                            tool_call_id=tool_call.id,
-                            content=result,
-                            is_error=False,
-                        ))
-                    # Then check system tools
-                    elif tool_call.name in self._enabled_system_tools:
-                        system_tool = self._system_tool_registry.get(tool_call.name)
-                        if system_tool:
-                            try:
-                                result = await system_tool.execute(
-                                    **tool_call.arguments,
-                                    __agent_definition=self._definition,
-                                    __agent_node=self.node,
-                                    __execution_context=context,
-                                )
-                                tool_results.append(ToolResult(
-                                    tool_call_id=tool_call.id,
-                                    content=result,
-                                    is_error=False,
-                                ))
-                                tool_results.append(ToolResult(
-                                    tool_call_id=tool_call.id,
-                                    content=result,
-                                    is_error=False,
-                                ))
-                            except Exception as e:
-                                logger.error(f"System tool execution error: {e}")
-                                tool_results.append(ToolResult(
-                                    tool_call_id=tool_call.id,
-                                    content=f"Error: {str(e)}",
-                                    is_error=True,
-                                ))
-                        else:
-                            tool_results.append(ToolResult(
-                                tool_call_id=tool_call.id,
-                                content=f"System tool not found: {tool_call.name}",
-                                is_error=True,
-                            ))
-                    else:
-                        tool_results.append(ToolResult(
-                            tool_call_id=tool_call.id,
-                            content=f"Unknown tool: {tool_call.name}",
-                            is_error=True,
-                        ))
+                tool_results = await self._execute_tool_calls(tool_calls, context)
 
-                    # Yield tool result for visibility
+                # Yield tool results for visibility
+                for tool_result in tool_results:
                     yield AgentResponseUpdate(
                         delta_content="",
                         is_complete=False,
                         metadata={"tool_result": {
-                            "tool_call_id": tool_results[-1].tool_call_id,
-                            "content": tool_results[-1].content[:500],  # Truncate for UI
-                            "is_error": tool_results[-1].is_error,
+                            "tool_call_id": tool_result.tool_call_id,
+                            "content": tool_result.content[:500],  # Truncate for UI
+                            "is_error": tool_result.is_error,
+                            "metadata": tool_result.metadata,
                         }},
                     )
 
@@ -530,7 +634,7 @@ class BuiltinAgentAdapter(AgentAdapter):
         if self._definition:
             return AgentCapabilities(
                 supports_streaming=self._definition.streaming_enabled,
-                supports_tools=len(self._definition.builtin_tools) > 0,
+                supports_tools=len(self._get_tools_for_api()) > 0,
                 supports_vision="vision" in self._definition.model.lower() if self._definition.model else False,
                 max_context_length=128000 if "gpt-4" in (self._definition.model or "") else 16000,
             )
@@ -593,51 +697,7 @@ class BuiltinAgentAdapter(AgentAdapter):
 
     def _get_tools_for_api(self) -> List[Dict[str, Any]]:
         """Convert built-in tools and system tools to OpenAI function calling format."""
-        tools = []
-
-        # Add custom built-in tools
-        if self._definition and self._definition.builtin_tools:
-            for tool_def in self._definition.builtin_tools:
-                # Build parameter schema
-                properties = {}
-                required = []
-
-                for param in tool_def.parameters:
-                    param_schema: Dict[str, Any] = {
-                        "type": param.type.value if hasattr(param.type, 'value') else str(param.type),
-                        "description": param.description,
-                    }
-                    if param.enum:
-                        param_schema["enum"] = param.enum
-                    if param.default is not None:
-                        param_schema["default"] = param.default
-
-                    properties[param.name] = param_schema
-                    if param.required:
-                        required.append(param.name)
-
-                tool = {
-                    "type": "function",
-                    "function": {
-                        "name": tool_def.name,
-                        "description": tool_def.description,
-                        "parameters": {
-                            "type": "object",
-                            "properties": properties,
-                            "required": required,
-                        },
-                    },
-                }
-                tools.append(tool)
-
-        # Add enabled system tools
-        if self._enabled_system_tools:
-            system_tool_schemas = self._system_tool_registry.get_openai_schemas(
-                self._enabled_system_tools
-            )
-            tools.extend(system_tool_schemas)
-
-        return tools
+        return self._tool_executor.get_openai_schemas()
 
     async def _execute_tool(
         self,
@@ -772,53 +832,22 @@ class BuiltinAgentAdapter(AgentAdapter):
         context: ExecutionContext,
     ) -> AgentResponse:
         """Handle tool calls in the response."""
-        from ..core.models import ToolResult
-
-        tool_results = []
-
-        for tool_call in response.tool_calls:
-            # First check if it's a custom built-in tool
-            tool_def = self._tools_registry.get(tool_call.name)
-            if tool_def:
-                result = await self._execute_tool(tool_def, tool_call.arguments)
-                tool_results.append(ToolResult(
-                    tool_call_id=tool_call.id,
-                    content=result,
-                    is_error=False,
-                ))
-            # Then check if it's a system tool
-            elif tool_call.name in self._enabled_system_tools:
-                system_tool = self._system_tool_registry.get(tool_call.name)
-                if system_tool:
-                    try:
-                        result = await system_tool.execute(**tool_call.arguments)
-                        tool_results.append(ToolResult(
-                            tool_call_id=tool_call.id,
-                            content=result,
-                            is_error=False,
-                        ))
-                    except Exception as e:
-                        logger.error(f"System tool execution error: {e}")
-                        tool_results.append(ToolResult(
-                            tool_call_id=tool_call.id,
-                            content=f"Error executing system tool: {str(e)}",
-                            is_error=True,
-                        ))
-                else:
-                    tool_results.append(ToolResult(
-                        tool_call_id=tool_call.id,
-                        content=f"System tool not found: {tool_call.name}",
-                        is_error=True,
-                    ))
-            else:
-                tool_results.append(ToolResult(
-                    tool_call_id=tool_call.id,
-                    content=f"Unknown tool: {tool_call.name}",
-                    is_error=True,
-                ))
-
-        response.tool_results = tool_results
+        _ = messages
+        response.tool_results = await self._execute_tool_calls(
+            response.tool_calls,
+            context,
+        )
         return response
+
+    async def _execute_tool_calls(
+        self,
+        tool_calls: List[Any],
+        context: ExecutionContext,
+    ) -> List[Any]:
+        return [
+            await self._tool_executor.execute(tool_call=tool_call, context=context)
+            for tool_call in tool_calls
+        ]
 
     def _format_output(self, response: AgentResponse) -> AgentResponse:
         """Format output according to output format configuration."""
@@ -904,7 +933,7 @@ class BuiltinAgentAdapter(AgentAdapter):
             },
         )
 
-    def _create_fallback_response(self, messages: List[ChatMessage]) -> AgentResponse:
+    def _create_fallback_response(self) -> AgentResponse:
         """Create fallback response when chat client is not available."""
         return AgentResponse(
             messages=[ChatMessage(

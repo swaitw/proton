@@ -35,7 +35,10 @@ from ..core.models import (
     OutputFormat,
     AgentTemplate,
     InstalledSkill,
+    ArtifactCandidateStatus,
+    ArtifactRolloutStatus,
 )
+from ..governance import ApprovalRecord, ApprovalStatus, get_approval_service
 from ..core.agent_node import AgentNode
 from ..orchestration.workflow import (
     Workflow,
@@ -198,11 +201,118 @@ class PublishRequest(BaseModel):
     tags: List[str] = Field(default_factory=list)
 
 
+class CreateApprovalRequest(BaseModel):
+    """Request to create an approval entry."""
+
+    workflow_id: Optional[str] = None
+    execution_id: Optional[str] = None
+    node_id: Optional[str] = None
+    node_name: Optional[str] = None
+    tool_call_id: str
+    tool_name: str
+    tool_source: str = "manual"
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    approval_required: bool = True
+    is_dangerous: bool = False
+    reason: Optional[str] = None
+    requested_by: Optional[str] = None
+
+
+class ResolveApprovalRequest(BaseModel):
+    """Request to resolve an approval entry."""
+
+    actor: Optional[str] = None
+    comment: Optional[str] = None
+
+
 class GatewayRequest(BaseModel):
     """Request for the gateway router."""
     message: str
     stream: bool = True
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ArtifactDecisionRequest(BaseModel):
+    user_id: str = "default"
+    source_session_id: Optional[str] = None
+    parent_candidate_id: Optional[str] = None
+    task_summary: str
+    repeat_count: int = 1
+    tool_call_count: int = 0
+    unique_tool_count: int = 0
+    parallel_branches: int = 0
+    requires_long_running: bool = False
+    has_manual_steps: bool = False
+    failure_rate: float = 0.0
+    high_risk: bool = False
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ArtifactDecisionFromTrajectoryRequest(BaseModel):
+    user_id: str = "default"
+    session_id: str
+    tool_execution_audit: List[Dict[str, Any]] = Field(default_factory=list)
+    approval_results: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ArtifactApproveRequest(BaseModel):
+    approver: str = "system"
+    bind_agent_id: Optional[str] = None
+
+
+class ArtifactMetricsCollectRequest(BaseModel):
+    reporter: str = "system"
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ArtifactRolloutDecisionRequest(BaseModel):
+    min_sample_size: int = 20
+    upgrade_success_rate: float = 0.97
+    rollback_error_rate: float = 0.08
+    max_latency_p95_ms: float = 2500.0
+    min_success_rate_for_rollback: float = 0.85
+    auto_apply: bool = False
+    operator: str = "system"
+
+
+class ArtifactRolloutTransitionRequest(BaseModel):
+    target_status: ArtifactRolloutStatus
+    operator: str = "system"
+    reason: Optional[str] = None
+    freeze_window_minutes: Optional[int] = None
+    manual_override: bool = False
+    override_reason: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ArtifactABRoutingConfigRequest(BaseModel):
+    enabled: bool = True
+    control_ratio: float = 0.5
+    salt: str = ""
+    operator: str = "system"
+    notes: Optional[str] = None
+
+
+class ArtifactABRoutingRouteRequest(BaseModel):
+    subject_key: str
+    force_bucket: Optional[str] = None
+    force_target_candidate_id: Optional[str] = None
+
+
+class ArtifactRollbackFreezeOverrideRequest(BaseModel):
+    operator: str = "system"
+    reason: str = "manual_override"
+
+
+class ArtifactPeriodicLearningRequest(BaseModel):
+    user_id: Optional[str] = None
+    min_cluster_size: int = 2
+    max_sessions: int = 200
+    trigger_revision: bool = True
+    min_revision_samples: int = 12
+    revision_cooldown_hours: int = 24
+    dry_run: bool = False
 
 
 # ============== Application ==============
@@ -288,6 +398,85 @@ def create_app() -> FastAPI:
     async def health_check():
         """Health check endpoint."""
         return {"status": "healthy", "version": "0.1.0"}
+
+    # ============== Approval Endpoints ==============
+
+    @app.post("/api/approvals", response_model=ApprovalRecord, status_code=201)
+    async def create_approval(request: CreateApprovalRequest):
+        """Create an approval request manually or for integration tests."""
+        approval_service = get_approval_service()
+        approval = ApprovalRecord(
+            workflow_id=request.workflow_id,
+            execution_id=request.execution_id,
+            node_id=request.node_id,
+            node_name=request.node_name,
+            tool_call_id=request.tool_call_id,
+            tool_name=request.tool_name,
+            tool_source=request.tool_source,
+            arguments=request.arguments,
+            approval_required=request.approval_required,
+            is_dangerous=request.is_dangerous,
+            reason=request.reason,
+            requested_by=request.requested_by,
+        )
+        return await approval_service.create_approval(approval)
+
+    @app.get("/api/approvals", response_model=List[ApprovalRecord])
+    async def list_approvals(
+        status: Optional[ApprovalStatus] = None,
+        workflow_id: Optional[str] = None,
+        execution_id: Optional[str] = None,
+        tool_name: Optional[str] = None,
+    ):
+        """List persisted approval requests."""
+        approval_service = get_approval_service()
+        return await approval_service.list_approvals(
+            status=status,
+            workflow_id=workflow_id,
+            execution_id=execution_id,
+            tool_name=tool_name,
+        )
+
+    @app.get("/api/approvals/{approval_id}", response_model=ApprovalRecord)
+    async def get_approval(approval_id: str):
+        """Get a single approval request."""
+        approval_service = get_approval_service()
+        approval = await approval_service.get_approval(approval_id)
+        if approval is None:
+            raise HTTPException(status_code=404, detail="Approval not found")
+        return approval
+
+    @app.post("/api/approvals/{approval_id}/approve", response_model=ApprovalRecord)
+    async def approve_approval(approval_id: str, request: ResolveApprovalRequest):
+        """Approve a pending approval request."""
+        approval_service = get_approval_service()
+        try:
+            return await approval_service.resolve_approval(
+                approval_id,
+                approved=True,
+                actor=request.actor,
+                comment=request.comment,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Approval not found")
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+    @app.post("/api/approvals/{approval_id}/deny", response_model=ApprovalRecord)
+    async def deny_approval(approval_id: str, request: ResolveApprovalRequest):
+        """Deny a pending approval request."""
+        approval_service = get_approval_service()
+        try:
+            return await approval_service.resolve_approval(
+                approval_id,
+                approved=False,
+                actor=request.actor,
+                comment=request.comment,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Approval not found")
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     # ============== Workflow Endpoints ==============
 
@@ -844,7 +1033,8 @@ def create_app() -> FastAPI:
         from pathlib import Path
 
         # Save uploaded file to temporary location
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as temp_file:
+        upload_filename = file.filename or "upload.skill"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(str(upload_filename)).suffix) as temp_file:
             content = await file.read()
             temp_file.write(content)
             temp_file_path = temp_file.name
@@ -1645,7 +1835,7 @@ def create_app() -> FastAPI:
         manager = get_workflow_manager()
 
         # Get workflow to check if it exists
-        workflow = manager.get_workflow(workflow_id)
+        workflow = await manager.get_workflow(workflow_id)
         if not workflow:
             raise HTTPException(status_code=404, detail="Workflow not found")
 
@@ -1679,7 +1869,7 @@ def create_app() -> FastAPI:
         manager = get_workflow_manager()
 
         # Get workflow to check if it exists
-        workflow = manager.get_workflow(workflow_id)
+        workflow = await manager.get_workflow(workflow_id)
         if not workflow:
             raise HTTPException(status_code=404, detail="Workflow not found")
 
@@ -1694,7 +1884,7 @@ def create_app() -> FastAPI:
         # Remove None values
         workflow_config = {k: v for k, v in workflow_config.items() if v is not None}
 
-        manager.set_workflow_copilot_config(workflow_id, workflow_config)
+        await manager.set_workflow_copilot_config(workflow_id, workflow_config)
 
         # Return formatted config
         config = copilot.format_config(workflow_config)
@@ -1716,13 +1906,427 @@ def create_app() -> FastAPI:
         manager = get_workflow_manager()
 
         # Get workflow to check if it exists
-        workflow = manager.get_workflow(workflow_id)
+        workflow = await manager.get_workflow(workflow_id)
         if not workflow:
             raise HTTPException(status_code=404, detail="Workflow not found")
 
-        manager.delete_workflow_copilot_config(workflow_id)
+        await manager.delete_workflow_copilot_config(workflow_id)
 
         return {"status": "deleted"}
+
+    # ============== Artifact Factory Endpoints ==============
+
+    @app.post("/api/artifacts/decide", summary="评估并创建生成候选")
+    async def decide_artifact(request: ArtifactDecisionRequest):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        try:
+            candidate = await factory.decide_and_create_candidate(
+                user_id=request.user_id,
+                source_session_id=request.source_session_id,
+                parent_candidate_id=request.parent_candidate_id,
+                task_summary=request.task_summary,
+                repeat_count=request.repeat_count,
+                tool_call_count=request.tool_call_count,
+                unique_tool_count=request.unique_tool_count,
+                parallel_branches=request.parallel_branches,
+                requires_long_running=request.requires_long_running,
+                has_manual_steps=request.has_manual_steps,
+                failure_rate=request.failure_rate,
+                high_risk=request.high_risk,
+                metadata=request.metadata,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 404 if "not found" in detail else 400
+            raise HTTPException(status_code=status_code, detail=detail)
+        return candidate.model_dump()
+
+    @app.post("/api/artifacts/decide/from-trajectory", summary="基于真实执行轨迹自动提取信号并创建候选")
+    async def decide_artifact_from_trajectory(request: ArtifactDecisionFromTrajectoryRequest):
+        from ..artifacts import get_artifact_factory_service
+        from ..copilot import get_copilot_service
+
+        copilot = get_copilot_service()
+        session = await copilot.get_session(request.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        all_sessions = await copilot.session_manager.list_sessions()
+        all_user_messages: List[str] = []
+        for item in all_sessions:
+            for message in item.messages:
+                if message.role == "user" and message.content.strip():
+                    all_user_messages.append(message.content)
+
+        messages = [
+            {
+                "role": msg.role,
+                "content": msg.content,
+                "tool_calls": msg.tool_calls or [],
+                "tool_results": msg.tool_results or [],
+            }
+            for msg in session.messages
+        ]
+
+        tool_execution_audit: List[Dict[str, Any]] = list(request.tool_execution_audit)
+        metadata_audit = request.metadata.get("tool_execution_audit")
+        if isinstance(metadata_audit, list):
+            tool_execution_audit.extend(
+                item for item in metadata_audit if isinstance(item, dict)
+            )
+
+        approval_results: List[Dict[str, Any]] = list(request.approval_results)
+        metadata_approval = request.metadata.get("approval_results")
+        if isinstance(metadata_approval, list):
+            approval_results.extend(
+                item for item in metadata_approval if isinstance(item, dict)
+            )
+        for msg in messages:
+            for result in msg.get("tool_results") or []:
+                if not isinstance(result, dict):
+                    continue
+                result_metadata = result.get("metadata") or {}
+                if not isinstance(result_metadata, dict):
+                    continue
+                approval_status = str(
+                    result_metadata.get("approval_status", "")
+                ).lower()
+                if approval_status in {"pending", "approved", "denied"}:
+                    approval_results.append(
+                        {
+                            "status": approval_status,
+                            "approval_id": result_metadata.get("approval_id"),
+                            "tool_call_id": result.get("tool_call_id"),
+                        }
+                    )
+
+        factory = get_artifact_factory_service()
+        candidate = await factory.decide_from_execution_trajectory(
+            user_id=request.user_id,
+            source_session_id=request.session_id,
+            messages=messages,
+            all_sessions_user_messages=all_user_messages,
+            tool_execution_audit=tool_execution_audit,
+            approval_results=approval_results,
+            metadata=request.metadata,
+        )
+        return candidate.model_dump()
+
+    @app.get("/api/artifacts/candidates", summary="列出生成候选")
+    async def list_artifact_candidates(
+        status: Optional[ArtifactCandidateStatus] = None,
+        user_id: Optional[str] = None,
+    ):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        candidates = await factory.list_candidates(status=status, user_id=user_id)
+        return [c.model_dump() for c in candidates]
+
+    @app.get(
+        "/api/artifacts/candidates/{candidate_id}/lineage",
+        summary="查询产物版本系谱",
+    )
+    async def get_artifact_candidate_lineage(candidate_id: str):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        try:
+            return await factory.get_candidate_lineage(candidate_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+
+    @app.get(
+        "/api/artifacts/candidates/{candidate_id}/decision-explanations",
+        summary="查询候选的决策解释记录",
+    )
+    async def list_artifact_candidate_decision_explanations(candidate_id: str):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        try:
+            explanations = await factory.get_decision_explanations(candidate_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        return {
+            "candidate_id": candidate_id,
+            "count": len(explanations),
+            "items": explanations,
+        }
+
+    @app.post("/api/artifacts/candidates/{candidate_id}/approve", summary="审批并物化候选")
+    async def approve_artifact_candidate(candidate_id: str, request: ArtifactApproveRequest):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        try:
+            candidate = await factory.approve_and_materialize(
+                candidate_id=candidate_id,
+                approver=request.approver,
+                bind_agent_id=request.bind_agent_id,
+            )
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        return candidate.model_dump()
+
+    @app.post("/api/artifacts/candidates/{candidate_id}/metrics", summary="采集产物效果指标")
+    async def collect_artifact_candidate_metrics(
+        candidate_id: str,
+        request: ArtifactMetricsCollectRequest,
+    ):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        try:
+            candidate = await factory.collect_effect_metrics(
+                candidate_id=candidate_id,
+                metrics=request.metrics,
+                reporter=request.reporter,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 404 if "not found" in detail else 400
+            raise HTTPException(status_code=status_code, detail=detail)
+        return candidate.model_dump()
+
+    @app.get("/api/artifacts/dashboard", summary="获取产物指标看板")
+    async def get_artifact_dashboard(
+        user_id: Optional[str] = None,
+        include_candidates: int = 20,
+    ):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        include_candidates = max(1, min(include_candidates, 100))
+        return await factory.get_metrics_dashboard(
+            user_id=user_id,
+            include_candidates=include_candidates,
+        )
+
+    @app.get("/api/artifacts/alerts", summary="查询产物告警事件")
+    async def list_artifact_alert_events(
+        user_id: Optional[str] = None,
+        candidate_id: Optional[str] = None,
+        severity: Optional[str] = None,
+        limit: int = 100,
+    ):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        limit = max(1, min(limit, 500))
+        events = await factory.list_alert_events(
+            user_id=user_id,
+            candidate_id=candidate_id,
+            severity=severity,
+            limit=limit,
+        )
+        return {
+            "count": len(events),
+            "items": events,
+        }
+
+    @app.post(
+        "/api/artifacts/candidates/{candidate_id}/rollout/decide",
+        summary="自动升级与回滚决策",
+    )
+    async def decide_artifact_candidate_rollout(
+        candidate_id: str,
+        request: ArtifactRolloutDecisionRequest,
+    ):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        try:
+            return await factory.decide_rollout_action(
+                candidate_id=candidate_id,
+                min_sample_size=request.min_sample_size,
+                upgrade_success_rate=request.upgrade_success_rate,
+                rollback_error_rate=request.rollback_error_rate,
+                max_latency_p95_ms=request.max_latency_p95_ms,
+                min_success_rate_for_rollback=request.min_success_rate_for_rollback,
+                auto_apply=request.auto_apply,
+                operator=request.operator,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 404 if "not found" in detail else 400
+            raise HTTPException(status_code=status_code, detail=detail)
+
+    @app.post(
+        "/api/artifacts/candidates/{candidate_id}/rollout/transition",
+        summary="灰度状态流转",
+    )
+    async def transition_artifact_candidate_rollout(
+        candidate_id: str,
+        request: ArtifactRolloutTransitionRequest,
+    ):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        try:
+            candidate = await factory.transition_rollout_status(
+                candidate_id=candidate_id,
+                target_status=request.target_status,
+                operator=request.operator,
+                reason=request.reason,
+                metadata=request.metadata,
+                freeze_window_minutes=request.freeze_window_minutes,
+                manual_override=request.manual_override,
+                override_reason=request.override_reason,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 404 if "not found" in detail else 400
+            raise HTTPException(status_code=status_code, detail=detail)
+        return candidate.model_dump()
+
+    @app.post(
+        "/api/artifacts/candidates/{candidate_id}/ab-routing/config",
+        summary="配置 A/B 灰度路由策略",
+    )
+    async def configure_artifact_candidate_ab_routing(
+        candidate_id: str,
+        request: ArtifactABRoutingConfigRequest,
+    ):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        try:
+            candidate = await factory.configure_ab_routing(
+                candidate_id=candidate_id,
+                enabled=request.enabled,
+                control_ratio=request.control_ratio,
+                salt=request.salt,
+                operator=request.operator,
+                notes=request.notes,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 404 if "not found" in detail else 400
+            raise HTTPException(status_code=status_code, detail=detail)
+        return candidate.model_dump()
+
+    @app.post(
+        "/api/artifacts/candidates/{candidate_id}/ab-routing/route",
+        summary="执行 A/B 灰度路由",
+    )
+    async def route_artifact_candidate_ab_bucket(
+        candidate_id: str,
+        request: ArtifactABRoutingRouteRequest,
+    ):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        try:
+            return await factory.route_candidate_ab_bucket(
+                candidate_id=candidate_id,
+                subject_key=request.subject_key,
+                force_bucket=request.force_bucket,
+                force_target_candidate_id=request.force_target_candidate_id,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            status_code = 404 if "not found" in detail else 400
+            raise HTTPException(status_code=status_code, detail=detail)
+
+    @app.get(
+        "/api/artifacts/candidates/{candidate_id}/rollout/freeze",
+        summary="查询回滚冻结窗口状态",
+    )
+    async def get_artifact_candidate_rollback_freeze(candidate_id: str):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        try:
+            return await factory.get_rollback_freeze(candidate_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+
+    @app.post(
+        "/api/artifacts/candidates/{candidate_id}/rollout/freeze/override",
+        summary="人工 override 回滚冻结窗口",
+    )
+    async def override_artifact_candidate_rollback_freeze(
+        candidate_id: str,
+        request: ArtifactRollbackFreezeOverrideRequest,
+    ):
+        from ..artifacts import get_artifact_factory_service
+
+        factory = get_artifact_factory_service()
+        try:
+            candidate = await factory.override_rollback_freeze(
+                candidate_id=candidate_id,
+                operator=request.operator,
+                reason=request.reason,
+            )
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        return candidate.model_dump()
+
+    @app.post(
+        "/api/artifacts/learning/cycle",
+        summary="周期学习：轨迹聚类发现候选 + 自动修订触发",
+    )
+    async def run_artifact_periodic_learning_cycle(
+        request: ArtifactPeriodicLearningRequest,
+    ):
+        from ..artifacts import get_artifact_factory_service
+        from ..copilot import get_copilot_service
+
+        copilot = get_copilot_service()
+        sessions = await copilot.session_manager.list_sessions()
+        sessions_sorted = sorted(
+            sessions,
+            key=lambda s: s.updated_at,
+            reverse=True,
+        )
+        max_sessions = max(1, int(request.max_sessions))
+        if max_sessions:
+            sessions_sorted = sessions_sorted[:max_sessions]
+
+        trajectories: List[Dict[str, Any]] = []
+        for session in sessions_sorted:
+            session_user_id = str((session.metadata or {}).get("user_id", "")).strip()
+            if request.user_id and session_user_id != request.user_id:
+                continue
+            if not session.messages:
+                continue
+            trajectories.append(
+                {
+                    "session_id": session.session_id,
+                    "user_id": session_user_id or request.user_id or "default",
+                    "messages": [
+                        {
+                            "role": msg.role,
+                            "content": msg.content,
+                            "tool_calls": msg.tool_calls or [],
+                            "tool_results": msg.tool_results or [],
+                        }
+                        for msg in session.messages
+                    ],
+                    "updated_at": session.updated_at.isoformat(),
+                }
+            )
+
+        factory = get_artifact_factory_service()
+        result = await factory.run_periodic_learning_cycle(
+            trajectories=trajectories,
+            user_id=request.user_id,
+            min_cluster_size=request.min_cluster_size,
+            dry_run=request.dry_run,
+            trigger_revision=request.trigger_revision,
+            min_revision_samples=request.min_revision_samples,
+            revision_cooldown_hours=request.revision_cooldown_hours,
+        )
+        result["input"] = {
+            "session_count": len(trajectories),
+            "max_sessions": max_sessions,
+            "trigger_revision": request.trigger_revision,
+            "dry_run": request.dry_run,
+        }
+        return result
 
     # ============== Search Config Endpoints ==============
 
@@ -2016,6 +2620,8 @@ def create_app() -> FastAPI:
         model: str = "gpt-4"
         api_key: Optional[str] = None
         base_url: Optional[str] = None
+        memory_enabled: bool = True
+        global_memory_enabled: bool = False
 
     class PortalChatRequest(BaseModel):
         """Request to chat with a Super Portal."""
@@ -2023,6 +2629,14 @@ def create_app() -> FastAPI:
         message: str
         user_id: str = "default"
         stream: bool = True
+
+    class PortalSafetyScanRequest(BaseModel):
+        """Manual pre-generation safety scan request."""
+        user_message: str
+        intent: str = ""
+        workflow_results: Dict[str, str] = Field(default_factory=dict)
+        memory_snapshot: str = ""
+        user_id: str = "default"
 
     @app.post("/api/portals", summary="创建超级入口")
     async def create_portal(request: CreatePortalRequest):
@@ -2045,6 +2659,8 @@ def create_app() -> FastAPI:
             model=request.model,
             api_key=request.api_key,
             base_url=request.base_url,
+            memory_enabled=request.memory_enabled,
+            global_memory_enabled=request.global_memory_enabled,
         )
         return config.model_dump()
 
@@ -2072,7 +2688,9 @@ def create_app() -> FastAPI:
         更新超级入口配置。
 
         可更新字段：name, description, workflow_ids, provider, model,
-        api_key, base_url, memory_enabled, max_memory_entries, public
+        api_key, base_url, memory_enabled, max_memory_entries,
+        memory_importance_threshold, global_memory_enabled, global_max_memory_entries,
+        max_session_messages, session_ttl_hours, public
         """
         from ..portal import get_portal_manager
         mgr = get_portal_manager()
@@ -2121,6 +2739,31 @@ def create_app() -> FastAPI:
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         return session.model_dump()
+
+    @app.get("/api/portals/{portal_id}/sessions/search", summary="检索历史会话片段")
+    async def search_portal_sessions(
+        portal_id: str,
+        query: str,
+        user_id: str = "default",
+        top_k: int = 8,
+        exclude_session_id: Optional[str] = None,
+    ):
+        """
+        按关键词检索该超级入口下指定用户的历史会话片段。
+
+        适用于跨会话回忆：当当前会话里缺少上下文时，可主动检索历史讨论内容。
+        """
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        svc = await mgr.get_service(portal_id)
+        if not svc:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        return await svc.search_sessions(
+            user_id=user_id,
+            query=query,
+            top_k=top_k,
+            exclude_session_id=exclude_session_id,
+        )
 
     @app.post("/api/portals/{portal_id}/chat", summary="与超级入口对话（SSE流）")
     async def portal_chat(portal_id: str, request: PortalChatRequest):
@@ -2208,6 +2851,9 @@ def create_app() -> FastAPI:
         user_id: str = "default",
         query: str = "",
         top_k: int = 20,
+        min_confidence: float = 0.0,
+        confidence_tier: Optional[str] = None,
+        include_conflicted: bool = True,
     ):
         """
         查看超级入口为指定用户积累的长期记忆。
@@ -2219,8 +2865,37 @@ def create_app() -> FastAPI:
         svc = await mgr.get_service(portal_id)
         if not svc:
             raise HTTPException(status_code=404, detail="Portal not found")
-        memories = await svc.get_memories(user_id=user_id, query=query, top_k=top_k)
+        memories = await svc.get_memories(
+            user_id=user_id,
+            query=query,
+            top_k=top_k,
+            min_confidence=min_confidence,
+            confidence_tier=confidence_tier,
+            include_conflicted=include_conflicted,
+        )
         return [m.model_dump() for m in memories]
+
+    @app.post("/api/portals/{portal_id}/safety/scan", summary="生成前安全扫描")
+    async def portal_pre_generation_safety_scan(portal_id: str, request: PortalSafetyScanRequest):
+        """对当前上下文执行生成前安全扫描，返回是否会触发拦截。"""
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        svc = await mgr.get_service(portal_id)
+        if not svc:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        memories = await svc.get_memories(
+            user_id=request.user_id,
+            query=request.user_message,
+            top_k=10,
+        )
+        result = svc.pre_generation_safety_scan(
+            user_query=request.user_message,
+            intent=request.intent,
+            workflow_results=request.workflow_results,
+            memories=memories,
+            memory_snapshot=request.memory_snapshot,
+        )
+        return result.model_dump()
 
     @app.delete("/api/portals/{portal_id}/memories/{entry_id}", summary="删除单条记忆")
     async def delete_portal_memory(portal_id: str, entry_id: str):

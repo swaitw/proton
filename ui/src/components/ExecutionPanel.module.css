@@ -376,6 +376,119 @@
     color: #166534;
 }
 
+.approvalCard {
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.22);
+    border-radius: var(--radius-md);
+    padding: 14px 16px;
+    margin-bottom: 12px;
+}
+
+.approvalHeader {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.approvalTitle {
+    font-weight: 600;
+    color: #b45309;
+}
+
+.approvalMeta {
+    margin-top: 4px;
+    font-size: 0.78rem;
+    color: var(--color-text-muted);
+}
+
+.approvalBadge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.76rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.approvalBadgePending {
+    background: rgba(245, 158, 11, 0.16);
+    color: #b45309;
+}
+
+.approvalBadgeApproved {
+    background: rgba(34, 197, 94, 0.16);
+    color: #166534;
+}
+
+.approvalBadgeDenied {
+    background: rgba(239, 68, 68, 0.16);
+    color: #b91c1c;
+}
+
+.approvalSummary {
+    margin-top: 10px;
+    font-size: 0.84rem;
+    line-height: 1.6;
+    color: var(--color-text);
+}
+
+.approvalArgs {
+    margin-top: 10px;
+    margin-bottom: 0;
+    font-family: monospace;
+    font-size: 0.8rem;
+    background: var(--color-muted);
+    border: 1px solid var(--color-secondary);
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    overflow-x: auto;
+    color: var(--color-text);
+}
+
+.approvalDecision {
+    margin-top: 10px;
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+}
+
+.approvalActions {
+    display: flex;
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.approveButton,
+.denyButton {
+    border: none;
+    border-radius: var(--radius-sm);
+    color: #fff;
+    cursor: pointer;
+    font-weight: 600;
+    padding: 8px 16px;
+    transition: opacity 0.2s ease;
+}
+
+.approveButton {
+    background: #16a34a;
+}
+
+.denyButton {
+    background: #dc2626;
+}
+
+.approveButton:hover:not(:disabled),
+.denyButton:hover:not(:disabled) {
+    opacity: 0.9;
+}
+
+.approveButton:disabled,
+.denyButton:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 /* Final Result Section */
 .finalResultSection {
     margin-top: 24px;

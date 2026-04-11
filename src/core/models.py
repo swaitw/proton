@@ -487,6 +487,7 @@ class ToolResult(BaseModel):
     tool_call_id: str
     content: str
     is_error: bool = False
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentResponse(BaseModel):
@@ -518,6 +519,8 @@ class ExecutionEventType(str, Enum):
     NODE_THINKING = "node_thinking"
     NODE_TOOL_CALL = "node_tool_call"
     NODE_TOOL_RESULT = "node_tool_result"
+    APPROVAL_REQUIRED = "approval_required"
+    APPROVAL_RESOLVED = "approval_resolved"
     NODE_COMPLETE = "node_complete"
     NODE_ERROR = "node_error"
     ROUTING_START = "routing_start"
@@ -629,6 +632,50 @@ class CopilotEvent(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
+class ArtifactType(str, Enum):
+    NONE = "none"
+    SKILL = "skill"
+    WORKFLOW = "workflow"
+
+
+class ArtifactCandidateStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    MATERIALIZED = "materialized"
+
+
+class ArtifactRolloutStatus(str, Enum):
+    NOT_STARTED = "not_started"
+    GRAYSCALE = "grayscale"
+    PAUSED = "paused"
+    FULL_RELEASED = "full_released"
+    ROLLED_BACK = "rolled_back"
+
+
+class ArtifactCandidate(BaseModel):
+    id: str
+    user_id: str = "default"
+    source_session_id: Optional[str] = None
+    lineage_id: Optional[str] = None
+    parent_candidate_id: Optional[str] = None
+    version: int = 1
+    task_summary: str
+    artifact_type: ArtifactType = ArtifactType.NONE
+    confidence: float = 0.0
+    reasons: List[str] = Field(default_factory=list)
+    draft: Dict[str, Any] = Field(default_factory=dict)
+    status: ArtifactCandidateStatus = ArtifactCandidateStatus.PENDING
+    rollout_status: ArtifactRolloutStatus = ArtifactRolloutStatus.NOT_STARTED
+    approved_by: Optional[str] = None
+    materialized_ref_id: Optional[str] = None
+    effect_metrics: List[Dict[str, Any]] = Field(default_factory=list)
+    rollout_history: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
 # ============== Super Portal Models ==============
 
 class PortalMemoryEntry(BaseModel):
@@ -636,9 +683,13 @@ class PortalMemoryEntry(BaseModel):
     id: str
     portal_id: str
     user_id: str = "default"
-    content: str                          # Memory content (fact/preference/context)
-    memory_type: str = "fact"             # fact, preference, context, summary
-    importance: float = 0.5              # 0.0 - 1.0, used for pruning
+    content: str
+    memory_type: str = "fact"
+    importance: float = 0.5
+    confidence_score: float = 0.5
+    confidence_tier: str = "medium"
+    conflict_with: List[str] = Field(default_factory=list)
+    conflict_reason: Optional[str] = None
     source_session_id: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.now)
@@ -722,6 +773,8 @@ class SuperPortalConfig(BaseModel):
     memory_enabled: bool = True
     max_memory_entries: int = 100         # Per user
     memory_importance_threshold: float = 0.3   # Entries below this are pruned first
+    global_memory_enabled: bool = False   # Cross-portal shared memory for the same user
+    global_max_memory_entries: int = 300  # Per user in global layer
 
     # Session settings
     max_session_messages: int = 50        # Keep last N messages per session
@@ -742,6 +795,7 @@ class PortalEventType(str, Enum):
     WORKFLOW_DISPATCH_START = "workflow_dispatch_start"  # Starting a workflow
     WORKFLOW_DISPATCH_RESULT = "workflow_dispatch_result"  # Workflow returned result
     SYNTHESIS_START = "synthesis_start"             # Starting final answer synthesis
+    SAFETY_BLOCKED = "safety_blocked"               # Blocked by pre-generation safety scan
     CONTENT = "content"                             # Streaming content delta
     MEMORY_UPDATED = "memory_updated"               # Memory was updated
     COMPLETE = "complete"                           # Turn complete
@@ -759,5 +813,14 @@ class PortalEvent(BaseModel):
     workflow_name: Optional[str] = None
     workflow_result: Optional[str] = None
     memory_entry: Optional[PortalMemoryEntry] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class SafetyScanResult(BaseModel):
+    """Result of pre-generation safety scan."""
+    blocked: bool = False
+    severity: str = "none"  # none, low, medium, high
+    reasons: List[str] = Field(default_factory=list)
+    matched_rules: List[str] = Field(default_factory=list)

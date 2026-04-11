@@ -1,18 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { api, ExecutionEvent } from '../api/client';
+import axios from 'axios';
+import { api, ApprovalRecord, ExecutionEvent } from '../api/client';
+import {
+  applyApprovalEventToNodes,
+  createNodeState,
+  mergeApprovalIntoNodes,
+  NodeState,
+  setApprovalResolving,
+} from './executionState';
 import styles from './ExecutionPanel.module.css';
-
-interface NodeState {
-  id: string;
-  name: string;
-  status: 'pending' | 'running' | 'completed' | 'error';
-  depth: number;
-  content: string;
-  toolCalls: Array<{ id: string; name: string; arguments: Record<string, any> }>;
-  toolResults: Array<{ tool_call_id: string; content: string; is_error: boolean }>;
-  duration_ms?: number;
-  error?: string;
-}
+import { useToast } from './ToastProvider';
 
 interface ExecutionPanelProps {
   visible: boolean;
@@ -39,6 +36,53 @@ const ExecutionPanel: React.FC<ExecutionPanelProps> = ({
 
   const cancelRef = useRef<(() => void) | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const toast = useToast();
+
+  const getErrorMessage = useCallback((error: unknown) => {
+    if (axios.isAxiosError(error)) {
+      return (
+        error.response?.data?.detail
+        || error.response?.data?.message
+        || error.message
+      );
+    }
+    if (error instanceof Error) {
+      return error.message;
+    }
+    return '请求失败';
+  }, []);
+
+  const loadApproval = useCallback(async (approvalId: string, nodeId: string) => {
+    try {
+      const approval = await api.getApproval(approvalId);
+      setNodes((prev) => mergeApprovalIntoNodes(prev, nodeId, approval));
+    } catch (error) {
+      console.warn(`Failed to load approval ${approvalId}:`, error);
+    }
+  }, []);
+
+  const handleResolveApproval = useCallback(async (
+    nodeId: string,
+    approvalId: string,
+    approved: boolean,
+  ) => {
+    setNodes((prev) => setApprovalResolving(prev, nodeId, approvalId, true));
+
+    try {
+      const approval = approved
+        ? await api.approveApproval(approvalId, { actor: 'ui' })
+        : await api.denyApproval(approvalId, { actor: 'ui' });
+
+      setNodes((prev) => mergeApprovalIntoNodes(prev, nodeId, approval));
+      toast.success(
+        approved ? '审批已通过' : '审批已拒绝',
+        `${approval.tool_name} · ${approval.id.slice(0, 8)}`,
+      );
+    } catch (error) {
+      setNodes((prev) => setApprovalResolving(prev, nodeId, approvalId, false));
+      toast.error('审批操作失败', getErrorMessage(error));
+    }
+  }, [getErrorMessage, toast]);
 
   // Auto-scroll thinking content
   useEffect(() => {
@@ -91,22 +135,15 @@ const ExecutionPanel: React.FC<ExecutionPanelProps> = ({
         break;
 
       case 'node_start':
-        if (event.node_id && event.node_name) {
+        const nextNode = createNodeState(event);
+        if (nextNode) {
           setNodes(prev => {
             const newMap = new Map(prev);
-            newMap.set(event.node_id!, {
-              id: event.node_id!,
-              name: event.node_name!,
-              status: 'running',
-              depth: event.depth || 0,
-              content: '',
-              toolCalls: [],
-              toolResults: [],
-            });
+            newMap.set(nextNode.id, nextNode);
             return newMap;
           });
           // Auto-select newly started node
-          setSelectedNodeId(event.node_id);
+          setSelectedNodeId(nextNode.id);
         }
         break;
 
@@ -158,19 +195,15 @@ const ExecutionPanel: React.FC<ExecutionPanelProps> = ({
         }
         break;
 
-      case 'node_tool_result':
-        if (event.node_id && event.tool_result) {
-          setNodes(prev => {
-            const newMap = new Map(prev);
-            const node = newMap.get(event.node_id!);
-            if (node) {
-              newMap.set(event.node_id!, {
-                ...node,
-                toolResults: [...node.toolResults, event.tool_result!],
-              });
-            }
-            return newMap;
-          });
+      case 'approval_required':
+      case 'approval_resolved':
+        if (event.node_id) {
+          setNodes((prev) => applyApprovalEventToNodes(prev, event));
+          setSelectedNodeId(event.node_id);
+          const approvalId = event.metadata?.approval_id || event.tool_result?.metadata?.approval_id;
+          if (typeof approvalId === 'string' && approvalId) {
+            void loadApproval(approvalId, event.node_id);
+          }
         }
         break;
 
@@ -287,6 +320,35 @@ const ExecutionPanel: React.FC<ExecutionPanelProps> = ({
     if (ms === undefined) return '';
     if (ms < 1000) return `${Math.round(ms)}ms`;
     return `${(ms / 1000).toFixed(1)}s`;
+  };
+
+  const formatDateTime = (value?: string | null) => {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString('zh-CN', { hour12: false });
+  };
+
+  const formatApprovalStatus = (status: ApprovalRecord['status']) => {
+    switch (status) {
+      case 'approved':
+        return '已通过';
+      case 'denied':
+        return '已拒绝';
+      default:
+        return '待审批';
+    }
+  };
+
+  const getApprovalBadgeClass = (status: ApprovalRecord['status']) => {
+    switch (status) {
+      case 'approved':
+        return styles.approvalBadgeApproved;
+      case 'denied':
+        return styles.approvalBadgeDenied;
+      default:
+        return styles.approvalBadgePending;
+    }
   };
 
   return (
@@ -435,6 +497,67 @@ const ExecutionPanel: React.FC<ExecutionPanelProps> = ({
                             <pre className={styles.toolResultContent}>
                               {tr.content}
                             </pre>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Approvals */}
+                    {selectedNode.approvals.length > 0 && (
+                      <div className={styles.toolCallsSection}>
+                        <div className={styles.sectionTitle}>审批请求</div>
+                        {selectedNode.approvals.map((approval) => (
+                          <div key={approval.id} className={styles.approvalCard}>
+                            <div className={styles.approvalHeader}>
+                              <div>
+                                <div className={styles.approvalTitle}>{approval.tool_name}</div>
+                                <div className={styles.approvalMeta}>
+                                  {approval.tool_source} · ID: {approval.id.slice(0, 8)} · 请求时间: {formatDateTime(approval.requested_at)}
+                                </div>
+                              </div>
+                              <span className={`${styles.approvalBadge} ${getApprovalBadgeClass(approval.status)}`}>
+                                {formatApprovalStatus(approval.status)}
+                              </span>
+                            </div>
+
+                            <div className={styles.approvalSummary}>
+                              工具调用: {approval.tool_call_id}
+                              {approval.is_dangerous ? ' · 高风险' : ''}
+                              {approval.reason ? ` · 原因: ${approval.reason}` : ''}
+                            </div>
+
+                            {Object.keys(approval.arguments || {}).length > 0 && (
+                              <pre className={styles.approvalArgs}>
+                                {JSON.stringify(approval.arguments, null, 2)}
+                              </pre>
+                            )}
+
+                            {(approval.decision_by || approval.decision_comment || approval.resolved_at) && (
+                              <div className={styles.approvalDecision}>
+                                处理结果: {approval.decision_by || '系统'}
+                                {approval.resolved_at ? ` · ${formatDateTime(approval.resolved_at)}` : ''}
+                                {approval.decision_comment ? ` · ${approval.decision_comment}` : ''}
+                              </div>
+                            )}
+
+                            {approval.status === 'pending' && (
+                              <div className={styles.approvalActions}>
+                                <button
+                                  className={styles.approveButton}
+                                  onClick={() => handleResolveApproval(selectedNode.id, approval.id, true)}
+                                  disabled={approval.isResolving}
+                                >
+                                  {approval.isResolving ? '处理中...' : '批准'}
+                                </button>
+                                <button
+                                  className={styles.denyButton}
+                                  onClick={() => handleResolveApproval(selectedNode.id, approval.id, false)}
+                                  disabled={approval.isResolving}
+                                >
+                                  {approval.isResolving ? '处理中...' : '拒绝'}
+                                </button>
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>

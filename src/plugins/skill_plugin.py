@@ -7,7 +7,7 @@ Skills are Python functions that can be exposed as tools for agents.
 import logging
 import importlib
 import inspect
-from typing import Any, Callable, Dict, List, Optional, get_type_hints
+from typing import Any, Callable, Dict, List, Optional, cast, get_type_hints
 
 from .registry import Plugin, Tool
 from ..core.models import PluginConfig, SkillConfig
@@ -51,22 +51,30 @@ class SkillPlugin(Plugin):
 
     def _load_function(self) -> Optional[Callable[..., Any]]:
         """Load the skill function from module."""
+        if not self._skill_config:
+            return None
+
+        skill_config = self._skill_config
         try:
-            module = importlib.import_module(self._skill_config.module_path)
-            func = getattr(module, self._skill_config.function_name)
+            module = importlib.import_module(skill_config.module_path)
+            func = getattr(module, skill_config.function_name)
             return func
         except ImportError as e:
-            logger.error(f"Failed to import module {self._skill_config.module_path}: {e}")
+            logger.error(f"Failed to import module {skill_config.module_path}: {e}")
             return None
         except AttributeError as e:
             logger.error(
-                f"Function {self._skill_config.function_name} not found in "
-                f"{self._skill_config.module_path}: {e}"
+                f"Function {skill_config.function_name} not found in "
+                f"{skill_config.module_path}: {e}"
             )
             return None
 
     def _create_tool_from_function(self, func: Callable[..., Any]) -> Tool:
         """Create a Tool from a Python function."""
+        if not self._skill_config:
+            raise ValueError("SkillConfig is required")
+
+        skill_config = self._skill_config
         # Get function signature
         sig = inspect.signature(func)
 
@@ -75,8 +83,8 @@ class SkillPlugin(Plugin):
         parameters_schema = self._build_parameters_schema(sig, type_hints)
 
         # Use provided schema if available
-        if self._skill_config.parameters_schema:
-            parameters_schema = self._skill_config.parameters_schema
+        if skill_config.parameters_schema:
+            parameters_schema = skill_config.parameters_schema
 
         # Create handler that wraps the function
         async def handler(**kwargs: Any) -> Any:
@@ -89,15 +97,16 @@ class SkillPlugin(Plugin):
                 return {"error": str(e)}
 
         return Tool(
-            name=self._skill_config.name,
-            description=self._skill_config.description or (func.__doc__ or ""),
+            name=skill_config.name,
+            description=skill_config.description or (func.__doc__ or ""),
             parameters_schema=parameters_schema,
             handler=handler,
             source="skill",
+            approval_required=skill_config.approval_required,
             metadata={
-                "module": self._skill_config.module_path,
-                "function": self._skill_config.function_name,
-                "approval_required": self._skill_config.approval_required,
+                "module": skill_config.module_path,
+                "function": skill_config.function_name,
+                "approval_required": skill_config.approval_required,
             },
         )
 
@@ -115,6 +124,7 @@ class SkillPlugin(Plugin):
                 continue
 
             prop = {"type": "string"}  # Default
+            hint = None
 
             # Get type from hints
             if name in type_hints:
@@ -122,7 +132,7 @@ class SkillPlugin(Plugin):
                 prop = self._type_to_schema(hint)
 
             # Get description from Annotated if available
-            if hasattr(hint, '__metadata__'):
+            if hint is not None and hasattr(hint, '__metadata__'):
                 for meta in hint.__metadata__:
                     if isinstance(meta, str):
                         prop["description"] = meta
@@ -206,9 +216,10 @@ def skill(
         approval_required: Whether approval is needed before execution
     """
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        func._skill_name = name or func.__name__
-        func._skill_description = description or func.__doc__ or ""
-        func._skill_approval_required = approval_required
+        skill_func = cast(Any, func)
+        skill_func._skill_name = name or func.__name__
+        skill_func._skill_description = description or func.__doc__ or ""
+        skill_func._skill_approval_required = approval_required
         return func
 
     return decorator

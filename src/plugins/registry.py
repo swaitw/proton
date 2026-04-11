@@ -16,6 +16,9 @@ from ..core.models import (
 
 if TYPE_CHECKING:
     from ..core.agent_node import AgentNode
+    from .mcp_plugin import MCPPlugin
+    from .rag_plugin import RAGPlugin
+    from .skill_plugin import SkillPlugin
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,8 @@ class Tool:
     parameters_schema: Dict[str, Any] = field(default_factory=dict)
     handler: Optional[Callable[..., Any]] = None
     source: str = ""  # mcp, skill, rag
+    approval_required: bool = False
+    is_dangerous: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     async def execute(self, **kwargs: Any) -> Any:

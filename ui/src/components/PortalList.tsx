@@ -17,6 +17,7 @@ export interface Portal {
   api_key?: string;
   base_url?: string;
   memory_enabled: boolean;
+  global_memory_enabled?: boolean;
   api_key_access?: string;
   public: boolean;
   created_at: string;
@@ -68,6 +69,7 @@ interface FormState {
   api_key: string;
   base_url: string;
   memory_enabled: boolean;
+  global_memory_enabled: boolean;
 }
 
 const defaultForm = (): FormState => ({
@@ -79,6 +81,7 @@ const defaultForm = (): FormState => ({
   api_key: '',
   base_url: '',
   memory_enabled: true,
+  global_memory_enabled: false,
 });
 
 interface PortalModalProps {
@@ -101,6 +104,7 @@ const PortalModal: React.FC<PortalModalProps> = ({ portal, workflows, onClose, o
           api_key: portal.api_key ?? '',
           base_url: portal.base_url ?? '',
           memory_enabled: portal.memory_enabled,
+          global_memory_enabled: portal.global_memory_enabled ?? false,
         }
       : defaultForm()
   );
@@ -285,6 +289,23 @@ const PortalModal: React.FC<PortalModalProps> = ({ portal, workflows, onClose, o
           </div>
         </div>
 
+        <div
+          className={styles.wfItem}
+          style={{ border: '1px solid var(--color-secondary)', borderRadius: 8, marginTop: 10 }}
+          onClick={() => set('global_memory_enabled', !form.global_memory_enabled)}
+        >
+          <input
+            type="checkbox"
+            className={styles.wfCheckbox}
+            checked={form.global_memory_enabled}
+            onChange={() => {}}
+          />
+          <div className={styles.wfItemInfo}>
+            <div className={styles.wfItemName}>启用跨入口共享记忆</div>
+            <div className={styles.wfItemDesc}>同一用户在其他超级入口的记忆将参与检索</div>
+          </div>
+        </div>
+
         {/* Footer */}
         <div className={styles.modalFooter}>
           <button className={`${styles.btn} ${styles.btnSecondary}`} onClick={onClose}>
@@ -409,6 +430,7 @@ const PortalList: React.FC<PortalListProps> = ({ onOpenChat }) => {
       api_key: form.api_key || undefined,
       base_url: form.base_url || undefined,
       memory_enabled: form.memory_enabled,
+      global_memory_enabled: form.global_memory_enabled,
     };
 
     if (id) {

@@ -37,6 +37,30 @@ export interface ExecutionResult {
   duration_ms?: number;
 }
 
+export type ApprovalStatus = 'pending' | 'approved' | 'denied';
+
+export interface ApprovalRecord {
+  id: string;
+  status: ApprovalStatus;
+  workflow_id?: string | null;
+  execution_id?: string | null;
+  node_id?: string | null;
+  node_name?: string | null;
+  tool_call_id: string;
+  tool_name: string;
+  tool_source: string;
+  arguments: Record<string, any>;
+  approval_required: boolean;
+  is_dangerous: boolean;
+  reason?: string | null;
+  requested_by?: string | null;
+  requested_at: string;
+  updated_at: string;
+  resolved_at?: string | null;
+  decision_by?: string | null;
+  decision_comment?: string | null;
+}
+
 // Built-in agent types
 export interface ToolParameter {
   name: string;
@@ -178,6 +202,8 @@ export type ExecutionEventType =
   | 'node_thinking'
   | 'node_tool_call'
   | 'node_tool_result'
+  | 'approval_required'
+  | 'approval_resolved'
   | 'node_complete'
   | 'node_error'
   | 'routing_start';
@@ -192,6 +218,7 @@ export interface ToolResultData {
   tool_call_id: string;
   content: string;
   is_error: boolean;
+  metadata?: Record<string, any>;
 }
 
 export interface ExecutionEvent {
@@ -341,6 +368,38 @@ export const api = {
 
   async getWorkflow(id: string): Promise<WorkflowDetail> {
     const response = await client.get(`/api/workflows/${id}`);
+    return response.data;
+  },
+
+  // Approvals
+  async listApprovals(params?: {
+    status?: ApprovalStatus;
+    workflow_id?: string;
+    execution_id?: string;
+    tool_name?: string;
+  }): Promise<ApprovalRecord[]> {
+    const response = await client.get('/api/approvals', { params });
+    return response.data;
+  },
+
+  async getApproval(id: string): Promise<ApprovalRecord> {
+    const response = await client.get(`/api/approvals/${id}`);
+    return response.data;
+  },
+
+  async approveApproval(
+    id: string,
+    data?: { actor?: string; comment?: string },
+  ): Promise<ApprovalRecord> {
+    const response = await client.post(`/api/approvals/${id}/approve`, data || {});
+    return response.data;
+  },
+
+  async denyApproval(
+    id: string,
+    data?: { actor?: string; comment?: string },
+  ): Promise<ApprovalRecord> {
+    const response = await client.post(`/api/approvals/${id}/deny`, data || {});
     return response.data;
   },
 
@@ -888,6 +947,7 @@ export const api = {
     api_key?: string;
     base_url?: string;
     memory_enabled?: boolean;
+    global_memory_enabled?: boolean;
   }): Promise<any> {
     const response = await client.post('/api/portals', data);
     return response.data;

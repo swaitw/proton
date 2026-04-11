@@ -775,7 +775,11 @@ class WorkflowManager:
         """
         # For now, this is a placeholder
         # In the future, we can store this in the workflow metadata or storage
-        pass
+        _ = workflow_id, config
+
+    async def delete_workflow_copilot_config(self, workflow_id: str) -> None:
+        """Delete workflow-level copilot config."""
+        _ = workflow_id
 
 
 # Global workflow manager instance

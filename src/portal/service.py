@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import secrets
+import re
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 from uuid import uuid4
@@ -28,6 +29,7 @@ from ..core.models import (
     PortalEventType,
     PortalMemoryEntry,
     PortalSession,
+    SafetyScanResult,
     SuperPortalConfig,
     WorkflowDispatchPlan,
 )
@@ -35,11 +37,13 @@ from ..orchestration.workflow import WorkflowManager, get_workflow_manager
 from ..storage.persistence import StorageManager, get_storage_manager
 from .intent import IntentUnderstandingService
 from .memory import PortalMemoryManager
+from .safety import PreGenerationSafetyScanner
 
 logger = logging.getLogger(__name__)
 
 PORTAL_COLLECTION = "portals"
 SESSION_COLLECTION = "portal_sessions"
+SAFETY_BLOCK_MESSAGE = "当前请求触发安全策略，已在生成前拦截。请移除潜在注入/敏感指令后重试。"
 
 SYNTHESIS_SYSTEM_PROMPT = """You are a helpful assistant that synthesises results from multiple specialised workflows into a single, coherent, and well-formatted response.
 
@@ -70,6 +74,7 @@ class PortalService:
         self._wf_manager = workflow_manager
         self._storage = storage
         self._memory = PortalMemoryManager(storage)
+        self._safety_scanner = PreGenerationSafetyScanner()
         self._client = None   # lazy-initialised OpenAI client
         self._intent_svc: Optional[IntentUnderstandingService] = None
 
@@ -129,12 +134,22 @@ class PortalService:
 
         # 2. Retrieve memories
         memories: List[PortalMemoryEntry] = []
+        memory_snapshot = ""
         if self.config.memory_enabled:
             memories = await self._memory.retrieve(
                 portal_id=self.config.id,
                 user_id=user_id,
                 query=user_message,
                 top_k=10,
+                include_global=self.config.global_memory_enabled,
+            )
+            memory_snapshot = await self._memory.bounded_snapshot(
+                portal_id=self.config.id,
+                user_id=user_id,
+                max_chars=1200,
+                max_entries=12,
+                min_importance=self.config.memory_importance_threshold,
+                include_global=self.config.global_memory_enabled,
             )
 
         # 3. Build conversation history for context
@@ -142,6 +157,12 @@ class PortalService:
             {"role": m.role, "content": m.content}
             for m in session.messages[-(self.config.max_session_messages):]
         ]
+        session_retrievals = await self.search_sessions(
+            user_id=user_id,
+            query=user_message,
+            top_k=6,
+            exclude_session_id=session.session_id,
+        )
 
         # 4. Get available workflows
         available_wfs = await self._get_available_workflows()
@@ -168,6 +189,8 @@ class PortalService:
             available_workflows=available_wfs,
             conversation_history=history,
             memories=memories,
+            memory_snapshot=memory_snapshot,
+            session_retrievals=session_retrievals,
         )
 
         yield PortalEvent(
@@ -227,7 +250,7 @@ class PortalService:
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for plan, result in zip(group, results):
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException):
                     result_text = f"[工作流 {plan.workflow_name} 执行出错: {result}]"
                 else:
                     result_text = result or "(无输出)"
@@ -243,55 +266,86 @@ class PortalService:
                     workflow_result=result_text[:500],  # preview in event
                 )
 
-        # 7. Synthesise final answer
-        yield PortalEvent(
-            type=PortalEventType.SYNTHESIS_START,
-            session_id=session_id,
-            portal_id=self.config.id,
-        )
-
-        final_answer = await self._synthesise(
-            client=client,
+        # 7. Pre-generation safety scan
+        safety = self.pre_generation_safety_scan(
             user_query=user_message,
             intent=intent_result.understood_intent,
             workflow_results=workflow_results,
             memories=memories,
-            history=history,
-            stream_callback=None,  # handled below
+            memory_snapshot=memory_snapshot,
         )
+        blocked_by_safety = safety.blocked
 
-        # Stream final answer character by character (chunked)
-        if stream:
-            async for chunk in self._stream_synthesis(
-                client=client,
-                user_query=user_message,
-                intent=intent_result.understood_intent,
-                workflow_results=workflow_results,
-                memories=memories,
-                history=history,
-            ):
-                yield PortalEvent(
-                    type=PortalEventType.CONTENT,
-                    session_id=session_id,
-                    portal_id=self.config.id,
-                    delta=chunk,
-                )
-            final_answer_for_session = await self._synthesise(
-                client=client,
-                user_query=user_message,
-                intent=intent_result.understood_intent,
-                workflow_results=workflow_results,
-                memories=memories,
-                history=history,
+        if blocked_by_safety:
+            yield PortalEvent(
+                type=PortalEventType.SAFETY_BLOCKED,
+                session_id=session_id,
+                portal_id=self.config.id,
+                metadata=safety.model_dump(),
             )
-        else:
             yield PortalEvent(
                 type=PortalEventType.CONTENT,
                 session_id=session_id,
                 portal_id=self.config.id,
-                delta=final_answer,
+                delta=SAFETY_BLOCK_MESSAGE,
             )
-            final_answer_for_session = final_answer
+            final_answer_for_session = SAFETY_BLOCK_MESSAGE
+        else:
+            # 8. Synthesise final answer
+            yield PortalEvent(
+                type=PortalEventType.SYNTHESIS_START,
+                session_id=session_id,
+                portal_id=self.config.id,
+            )
+
+            final_answer = await self._synthesise(
+                client=client,
+                user_query=user_message,
+                intent=intent_result.understood_intent,
+                workflow_results=workflow_results,
+                memories=memories,
+                memory_snapshot=memory_snapshot,
+                session_retrievals=session_retrievals,
+                history=history,
+                stream_callback=None,  # handled below
+            )
+
+            # Stream final answer character by character (chunked)
+            if stream:
+                async for chunk in self._stream_synthesis(
+                    client=client,
+                    user_query=user_message,
+                    intent=intent_result.understood_intent,
+                    workflow_results=workflow_results,
+                    memories=memories,
+                    memory_snapshot=memory_snapshot,
+                    session_retrievals=session_retrievals,
+                    history=history,
+                ):
+                    yield PortalEvent(
+                        type=PortalEventType.CONTENT,
+                        session_id=session_id,
+                        portal_id=self.config.id,
+                        delta=chunk,
+                    )
+                final_answer_for_session = await self._synthesise(
+                    client=client,
+                    user_query=user_message,
+                    intent=intent_result.understood_intent,
+                    workflow_results=workflow_results,
+                    memories=memories,
+                    memory_snapshot=memory_snapshot,
+                    session_retrievals=session_retrievals,
+                    history=history,
+                )
+            else:
+                yield PortalEvent(
+                    type=PortalEventType.CONTENT,
+                    session_id=session_id,
+                    portal_id=self.config.id,
+                    delta=final_answer,
+                )
+                final_answer_for_session = final_answer
 
         # 8. Update session
         session.messages.append(PortalConversationMessage(
@@ -311,7 +365,7 @@ class PortalService:
         await self._save_session(session)
 
         # 9. Extract and store memories (non-blocking)
-        if self.config.memory_enabled:
+        if self.config.memory_enabled and not blocked_by_safety:
             asyncio.create_task(self._extract_memories(
                 client=client,
                 session=session,
@@ -335,6 +389,9 @@ class PortalService:
         user_id: str = "default",
         query: str = "",
         top_k: int = 20,
+        min_confidence: float = 0.0,
+        confidence_tier: Optional[str] = None,
+        include_conflicted: bool = True,
     ) -> List[PortalMemoryEntry]:
         """Retrieve memories for a user."""
         return await self._memory.retrieve(
@@ -342,6 +399,10 @@ class PortalService:
             user_id=user_id,
             query=query,
             top_k=top_k,
+            include_global=self.config.global_memory_enabled,
+            min_confidence=min_confidence,
+            confidence_tier=confidence_tier,
+            include_conflicted=include_conflicted,
         )
 
     async def delete_memory(self, entry_id: str) -> bool:
@@ -351,6 +412,84 @@ class PortalService:
     async def clear_memories(self, user_id: str = "default") -> int:
         """Clear all memories for a user."""
         return await self._memory.clear(self.config.id, user_id)
+
+    def pre_generation_safety_scan(
+        self,
+        *,
+        user_query: str,
+        intent: str,
+        workflow_results: Dict[str, str],
+        memories: List[PortalMemoryEntry],
+        memory_snapshot: str,
+    ) -> SafetyScanResult:
+        """Run rule-based safety scan before final synthesis."""
+        return self._safety_scanner.scan(
+            user_query=user_query,
+            intent=intent,
+            workflow_results=workflow_results,
+            memories=memories,
+            memory_snapshot=memory_snapshot,
+        )
+
+    async def search_sessions(
+        self,
+        user_id: str,
+        query: str,
+        top_k: int = 8,
+        exclude_session_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve relevant snippets from historical sessions.
+
+        Returns lightweight snippets to avoid inflating prompt size.
+        """
+        if not query.strip() or top_k <= 0:
+            return []
+
+        query_tokens = set(self._tokenize_for_search(query))
+        if not query_tokens:
+            return []
+
+        all_sessions = await self._storage.backend.list_all(SESSION_COLLECTION)
+        scored: List[tuple[float, Dict[str, Any]]] = []
+
+        for raw in all_sessions:
+            try:
+                s = PortalSession(**raw)
+            except Exception:
+                continue
+
+            if s.portal_id != self.config.id or s.user_id != user_id:
+                continue
+            if exclude_session_id and s.session_id == exclude_session_id:
+                continue
+
+            for idx, msg in enumerate(s.messages):
+                content = (msg.content or "").strip()
+                if not content:
+                    continue
+                content_tokens = set(self._tokenize_for_search(content))
+                if not content_tokens:
+                    continue
+                overlap = query_tokens & content_tokens
+                if not overlap:
+                    continue
+                score = len(overlap) / len(query_tokens)
+                snippet = content if len(content) <= 220 else f"{content[:220]}..."
+                scored.append((
+                    score,
+                    {
+                        "session_id": s.session_id,
+                        "message_index": idx,
+                        "role": msg.role,
+                        "snippet": snippet,
+                        "score": score,
+                        "timestamp": msg.timestamp.isoformat(),
+                    },
+                ))
+
+        scored.sort(key=lambda x: (x[0], x[1]["timestamp"]), reverse=True)
+        return [item for _, item in scored[:top_k]]
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -417,12 +556,19 @@ class PortalService:
         intent: str,
         workflow_results: Dict[str, str],
         memories: List[PortalMemoryEntry],
+        memory_snapshot: str,
+        session_retrievals: List[Dict[str, Any]],
         history: List[Dict[str, str]],
         stream_callback=None,
     ) -> str:
         """Call LLM to synthesise a final answer (non-streaming)."""
         user_content = self._build_synthesis_prompt(
-            user_query, intent, workflow_results, memories
+            user_query,
+            intent,
+            workflow_results,
+            memories,
+            memory_snapshot=memory_snapshot,
+            session_retrievals=session_retrievals,
         )
         messages = [
             {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
@@ -450,11 +596,18 @@ class PortalService:
         intent: str,
         workflow_results: Dict[str, str],
         memories: List[PortalMemoryEntry],
+        memory_snapshot: str,
+        session_retrievals: List[Dict[str, Any]],
         history: List[Dict[str, str]],
     ) -> AsyncIterator[str]:
         """Stream synthesis chunks."""
         user_content = self._build_synthesis_prompt(
-            user_query, intent, workflow_results, memories
+            user_query,
+            intent,
+            workflow_results,
+            memories,
+            memory_snapshot=memory_snapshot,
+            session_retrievals=session_retrievals,
         )
         messages = [
             {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
@@ -483,8 +636,15 @@ class PortalService:
         intent: str,
         workflow_results: Dict[str, str],
         memories: List[PortalMemoryEntry],
+        memory_snapshot: str = "",
+        session_retrievals: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         memory_block = "\n".join(f"- {m.content}" for m in memories) or "(none)"
+        bounded_memory_block = memory_snapshot.strip() or "(none)"
+        retrieval_block = "\n".join(
+            f"- session={r.get('session_id')} role={r.get('role')}: {r.get('snippet', '')}"
+            for r in (session_retrievals or [])
+        ) or "(none)"
         results_block = "\n\n".join(
             f"### Workflow `{wf_id}` result:\n{text}"
             for wf_id, text in workflow_results.items()
@@ -492,8 +652,14 @@ class PortalService:
 
         return f"""User intent: {intent}
 
+Bounded memory snapshot:
+{bounded_memory_block}
+
 User memory context:
 {memory_block}
+
+Retrieved related session snippets:
+{retrieval_block}
 
 Workflow results:
 {results_block}
@@ -502,6 +668,15 @@ Original user message:
 {user_query}
 
 Please synthesise the above into a helpful, integrated response."""
+
+    @staticmethod
+    def _tokenize_for_search(text: str) -> List[str]:
+        text = text.lower()
+        tokens: List[str] = []
+        tokens.extend(re.findall(r"[a-z0-9]+", text))
+        for chunk in re.findall(r"[\u4e00-\u9fff]+", text):
+            tokens.extend(list(chunk))
+        return tokens
 
     async def _extract_memories(
         self,
@@ -521,6 +696,7 @@ Please synthesise the above into a helpful, integrated response."""
                 session_id=session.session_id,
                 llm_client=client,
                 model=self.config.model,
+                include_global=self.config.global_memory_enabled,
             )
 
             # Prune if over limit
@@ -531,6 +707,12 @@ Please synthesise the above into a helpful, integrated response."""
                     max_entries=self.config.max_memory_entries,
                     importance_threshold=self.config.memory_importance_threshold,
                 )
+                if self.config.global_memory_enabled:
+                    await self._memory.prune_global(
+                        user_id=user_id,
+                        max_entries=self.config.global_max_memory_entries,
+                        importance_threshold=self.config.memory_importance_threshold,
+                    )
 
             logger.debug(f"[Portal] Extracted {len(new_memories)} memories")
         except Exception as e:
@@ -590,6 +772,8 @@ class PortalManager:
 
     async def _load_all(self):
         try:
+            if self._storage is None:
+                return
             items = await self._storage.backend.list_all(PORTAL_COLLECTION)
             for item in items:
                 try:
@@ -602,6 +786,8 @@ class PortalManager:
             logger.error(f"[PortalManager] Load failed: {e}")
 
     async def _save_config(self, config: SuperPortalConfig):
+        if self._storage is None:
+            raise RuntimeError("Storage is not initialised")
         data = config.model_dump()
         for field in ("created_at", "updated_at"):
             if isinstance(data.get(field), datetime):
@@ -621,6 +807,8 @@ class PortalManager:
         model: str = "gpt-4",
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        memory_enabled: bool = True,
+        global_memory_enabled: bool = False,
     ) -> SuperPortalConfig:
         """Create and persist a new Super Portal configuration."""
         await self._ensure_ready()
@@ -634,6 +822,8 @@ class PortalManager:
             model=model,
             api_key=api_key,
             base_url=base_url,
+            memory_enabled=memory_enabled,
+            global_memory_enabled=global_memory_enabled,
             api_key_access=f"portal_{secrets.token_urlsafe(24)}",
         )
 
@@ -663,7 +853,9 @@ class PortalManager:
         allowed = {
             "name", "description", "workflow_ids",
             "provider", "model", "api_key", "base_url",
-            "memory_enabled", "max_memory_entries", "public",
+            "memory_enabled", "max_memory_entries", "memory_importance_threshold",
+            "global_memory_enabled", "global_max_memory_entries",
+            "max_session_messages", "session_ttl_hours", "public",
         }
         for k, v in updates.items():
             if k in allowed:
@@ -678,6 +870,8 @@ class PortalManager:
 
     async def delete_portal(self, portal_id: str) -> bool:
         await self._ensure_ready()
+        if self._storage is None:
+            return False
         if portal_id in self._portals:
             del self._portals[portal_id]
             self._services.pop(portal_id, None)
@@ -693,6 +887,8 @@ class PortalManager:
     async def get_service(self, portal_id: str) -> Optional[PortalService]:
         """Get (or lazily create) the PortalService for a portal."""
         await self._ensure_ready()
+        if self._storage is None or self._wf_manager is None:
+            return None
         config = self._portals.get(portal_id)
         if not config:
             return None

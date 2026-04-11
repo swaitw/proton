@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
@@ -50,6 +51,22 @@ class StorageBackend(ABC):
     @abstractmethod
     async def list_all(self, collection: str) -> List[Dict[str, Any]]:
         """List all items in a collection."""
+        pass
+
+    @abstractmethod
+    async def compare_and_set(
+        self,
+        collection: str,
+        id: str,
+        data: Dict[str, Any],
+        expected: Dict[str, Any],
+    ) -> bool:
+        """
+        Conditionally save an item only when expected key/value pairs match.
+
+        Returns:
+            True if updated successfully, False when expected values do not match.
+        """
         pass
 
     @abstractmethod
@@ -95,6 +112,33 @@ class FileStorageBackend(StorageBackend):
     def _get_item_path(self, collection: str, id: str) -> Path:
         """Get the path for an item."""
         return self._get_collection_path(collection) / f"{id}.json"
+
+    def _get_lock_path(self, collection: str, id: str) -> Path:
+        """Get the path for an item lock file."""
+        return self._get_collection_path(collection) / f".{id}.lock"
+
+    async def _acquire_file_lock(self, lock_path: Path, timeout_seconds: float = 5.0):
+        """Acquire inter-process file lock via lockfile creation."""
+        start = time.monotonic()
+        while True:
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                return fd
+            except FileExistsError:
+                if time.monotonic() - start >= timeout_seconds:
+                    raise TimeoutError(f"Timeout acquiring lock file: {lock_path}")
+                await asyncio.sleep(0.01)
+
+    @staticmethod
+    def _release_file_lock(lock_path: Path, fd: int) -> None:
+        """Release inter-process file lock."""
+        try:
+            os.close(fd)
+        finally:
+            try:
+                lock_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     async def save(self, collection: str, id: str, data: Dict[str, Any]) -> None:
         """Save an item to a JSON file."""
@@ -150,6 +194,37 @@ class FileStorageBackend(StorageBackend):
                 logger.error(f"Error loading {file_path}: {e}")
 
         return items
+
+    async def compare_and_set(
+        self,
+        collection: str,
+        id: str,
+        data: Dict[str, Any],
+        expected: Dict[str, Any],
+    ) -> bool:
+        """Conditionally update a JSON item with cross-process lock."""
+        async with self._lock:
+            path = self._get_item_path(collection, id)
+            lock_path = self._get_lock_path(collection, id)
+            lock_fd = await self._acquire_file_lock(lock_path)
+            try:
+                if not path.exists():
+                    return False
+                with open(path, "r", encoding="utf-8") as f:
+                    current = json.load(f)
+                for key, value in expected.items():
+                    if current.get(key) != value:
+                        return False
+
+                payload = dict(data)
+                payload["_id"] = id
+                payload["_updated_at"] = datetime.now().isoformat()
+                payload["_created_at"] = current.get("_created_at") or payload["_updated_at"]
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
+                return True
+            finally:
+                self._release_file_lock(lock_path, lock_fd)
 
     async def close(self) -> None:
         """No cleanup needed for file storage."""
@@ -252,6 +327,50 @@ class SQLiteStorageBackend(StorageBackend):
 
         return items
 
+    async def compare_and_set(
+        self,
+        collection: str,
+        id: str,
+        data: Dict[str, Any],
+        expected: Dict[str, Any],
+    ) -> bool:
+        """Conditionally update an item with transactional row lock."""
+        if not self._db:
+            raise RuntimeError("Database not initialized")
+
+        await self._db.execute("BEGIN IMMEDIATE")
+        try:
+            async with self._db.execute(
+                "SELECT data FROM items WHERE collection = ? AND id = ?",
+                (collection, id),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if not row:
+                await self._db.rollback()
+                return False
+
+            current = json.loads(row[0])
+            for key, value in expected.items():
+                if current.get(key) != value:
+                    await self._db.rollback()
+                    return False
+
+            now = datetime.now().isoformat()
+            data_json = json.dumps(data, ensure_ascii=False, default=str)
+            await self._db.execute(
+                """
+                UPDATE items
+                SET data = ?, updated_at = ?
+                WHERE collection = ? AND id = ?
+                """,
+                (data_json, now, collection, id),
+            )
+            await self._db.commit()
+            return True
+        except Exception:
+            await self._db.rollback()
+            raise
+
     async def close(self) -> None:
         """Close the database connection."""
         if self._db:
@@ -353,6 +472,46 @@ class PostgresStorageBackend(StorageBackend):
 
         return items
 
+    async def compare_and_set(
+        self,
+        collection: str,
+        id: str,
+        data: Dict[str, Any],
+        expected: Dict[str, Any],
+    ) -> bool:
+        """Conditionally update an item with transactional row lock."""
+        if not self._pool:
+            raise RuntimeError("Database not initialized")
+
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT data FROM items WHERE collection = $1 AND id = $2 FOR UPDATE",
+                    collection,
+                    id,
+                )
+                if not row:
+                    return False
+
+                current = row["data"]
+                if isinstance(current, str):
+                    current = json.loads(current)
+                for key, value in expected.items():
+                    if current.get(key) != value:
+                        return False
+
+                await conn.execute(
+                    """
+                    UPDATE items
+                    SET data = $3, updated_at = NOW()
+                    WHERE collection = $1 AND id = $2
+                    """,
+                    collection,
+                    id,
+                    json.dumps(data, ensure_ascii=False, default=str),
+                )
+                return True
+
     async def close(self) -> None:
         """Close the connection pool."""
         if self._pool:
@@ -374,6 +533,8 @@ class StorageManager:
     PLUGINS = "plugins"
     AGENTS = "agents"
     CONFIGS = "configs"  # 全局配置存储 (email, search, copilot)
+    APPROVALS = "approvals"
+    ARTIFACT_CANDIDATES = "artifact_candidates"
 
     def __init__(self, backend: StorageBackend):
         self.backend = backend
@@ -483,6 +644,68 @@ class StorageManager:
     async def list_configs(self) -> List[Dict[str, Any]]:
         """List all global configurations."""
         return await self.backend.list_all(self.CONFIGS)
+
+    # ============== Approvals ==============
+
+    async def save_approval(self, approval_data: Dict[str, Any]) -> str:
+        """Save an approval request."""
+        approval_id = approval_data.get("id") or str(uuid4())
+        approval_data["id"] = approval_id
+        await self.backend.save(self.APPROVALS, approval_id, approval_data)
+        return approval_id
+
+    async def load_approval(self, approval_id: str) -> Optional[Dict[str, Any]]:
+        """Load an approval request by ID."""
+        return await self.backend.load(self.APPROVALS, approval_id)
+
+    async def delete_approval(self, approval_id: str) -> bool:
+        """Delete an approval request."""
+        return await self.backend.delete(self.APPROVALS, approval_id)
+
+    async def list_approvals(self) -> List[Dict[str, Any]]:
+        """List all approval requests."""
+        return await self.backend.list_all(self.APPROVALS)
+
+    async def resolve_approval_if_pending(
+        self,
+        approval_data: Dict[str, Any],
+        *,
+        expected_updated_at: Optional[str] = None,
+    ) -> bool:
+        """
+        Atomically resolve an approval when it is still pending.
+
+        This provides cross-instance consistency (multiple API workers/processes).
+        """
+        approval_id = approval_data.get("id")
+        if not approval_id:
+            raise ValueError("approval_data.id is required")
+        expected: Dict[str, Any] = {"status": "pending"}
+        if expected_updated_at is not None:
+            expected["updated_at"] = expected_updated_at
+        return await self.backend.compare_and_set(
+            self.APPROVALS,
+            approval_id,
+            approval_data,
+            expected,
+        )
+
+    # ============== Artifact Candidates ==============
+
+    async def save_artifact_candidate(self, candidate_data: Dict[str, Any]) -> str:
+        """Save an artifact candidate."""
+        candidate_id = candidate_data.get("id") or str(uuid4())
+        candidate_data["id"] = candidate_id
+        await self.backend.save(self.ARTIFACT_CANDIDATES, candidate_id, candidate_data)
+        return candidate_id
+
+    async def load_artifact_candidate(self, candidate_id: str) -> Optional[Dict[str, Any]]:
+        """Load an artifact candidate by ID."""
+        return await self.backend.load(self.ARTIFACT_CANDIDATES, candidate_id)
+
+    async def list_artifact_candidates(self) -> List[Dict[str, Any]]:
+        """List all artifact candidates."""
+        return await self.backend.list_all(self.ARTIFACT_CANDIDATES)
 
 
 # ============== Global Storage Instance ==============
