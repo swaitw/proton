@@ -690,8 +690,21 @@ class PortalMemoryEntry(BaseModel):
     confidence_tier: str = "medium"
     conflict_with: List[str] = Field(default_factory=list)
     conflict_reason: Optional[str] = None
+    conflict_status: str = "none"
+    requires_confirmation: bool = False
+    conflict_note: Optional[str] = None
+    conflict_updated_at: Optional[datetime] = None
     source_session_id: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
+    merged_from: List[str] = Field(default_factory=list)
+    merged_into: Optional[str] = None
+    source_index: List[Dict[str, Any]] = Field(default_factory=list)
+    ttl_tier: str = "warm"  # hot | warm | cold
+    expires_at: Optional[datetime] = None
+    archived: bool = False
+    archived_at: Optional[datetime] = None
+    archive_reason: Optional[str] = None
+    restore_count: int = 0
     created_at: datetime = Field(default_factory=datetime.now)
     last_accessed: datetime = Field(default_factory=datetime.now)
     access_count: int = 0
@@ -773,8 +786,27 @@ class SuperPortalConfig(BaseModel):
     memory_enabled: bool = True
     max_memory_entries: int = 100         # Per user
     memory_importance_threshold: float = 0.3   # Entries below this are pruned first
+    memory_ttl_hot_hours: int = 24 * 30   # High-value memory
+    memory_ttl_warm_hours: int = 24 * 14  # Medium-value memory
+    memory_ttl_cold_hours: int = 24 * 3   # Low-value memory
+    memory_ttl_hot_importance: float = 0.8
+    memory_ttl_warm_importance: float = 0.5
     global_memory_enabled: bool = False   # Cross-portal shared memory for the same user
     global_max_memory_entries: int = 300  # Per user in global layer
+    retrieval_strategy_default: str = "balanced"  # balanced | lexical_first | semantic_first
+    retrieval_strategy_grayscale: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "enabled": False,
+            "version": 1,
+            "session_rules": [],
+            "user_rules": [],
+            "portal_rule": {
+                "traffic_ratio": 0.0,
+                "strategy": "semantic_first",
+                "salt": "v1",
+            },
+        }
+    )
 
     # Session settings
     max_session_messages: int = 50        # Keep last N messages per session

@@ -1,5 +1,6 @@
 import pathlib
 import sys
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 import pytest
@@ -8,6 +9,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from src.core.models import (
     IntentUnderstandingResult,
+    PortalMemoryEntry,
     PortalConversationMessage,
     PortalSession,
     SuperPortalConfig,
@@ -362,10 +364,14 @@ async def test_memory_confidence_tier_and_conflict_marking(tmp_path):
     assert m2.confidence_tier == "medium"
     assert m2.conflict_with
     assert m1.id in m2.conflict_with
+    assert m2.conflict_status == "pending"
+    assert m2.requires_confirmation is True
 
     all_memories = await manager.list_all("p1", "u1")
     first = next(item for item in all_memories if item.id == m1.id)
     assert m2.id in first.conflict_with
+    assert first.conflict_status == "pending"
+    assert first.requires_confirmation is True
 
     high_only = await manager.retrieve(
         portal_id="p1",
@@ -376,6 +382,89 @@ async def test_memory_confidence_tier_and_conflict_marking(tmp_path):
     )
     assert all(item.confidence_tier == "high" for item in high_only)
     assert all(not item.conflict_with for item in high_only)
+
+
+@pytest.mark.asyncio
+async def test_memory_conflict_pending_pool_and_default_downweight(tmp_path):
+    storage = await _create_storage(tmp_path)
+    manager = PortalMemoryManager(storage)
+
+    m1 = await manager.add(
+        "p1",
+        "u1",
+        "预算是100万",
+        memory_type="fact",
+        importance=0.9,
+        confidence_score=0.95,
+    )
+    m2 = await manager.add(
+        "p1",
+        "u1",
+        "预算不是100万",
+        memory_type="fact",
+        importance=0.9,
+        confidence_score=0.95,
+    )
+    stable = await manager.add(
+        "p1",
+        "u1",
+        "预算讨论上下文：Q2需要预算评审",
+        memory_type="context",
+        importance=0.65,
+        confidence_score=0.95,
+    )
+
+    pending = await manager.list_pending_conflicts("p1", "u1")
+    assert {m.id for m in pending} == {m1.id, m2.id}
+    assert all(m.conflict_status == "pending" for m in pending)
+    assert all(m.requires_confirmation for m in pending)
+
+    ranked = await manager.retrieve(
+        portal_id="p1",
+        user_id="u1",
+        query="预算",
+        top_k=1,
+        include_conflicted=True,
+    )
+    assert ranked
+    assert ranked[0].id == stable.id
+
+
+@pytest.mark.asyncio
+async def test_memory_confirm_and_resolve_conflict_api_behaviour(tmp_path):
+    storage = await _create_storage(tmp_path)
+    manager = PortalMemoryManager(storage)
+
+    m1 = await manager.add("p1", "u1", "预算是100万", memory_type="fact", importance=0.8, confidence_score=0.9)
+    m2 = await manager.add("p1", "u1", "预算不是100万", memory_type="fact", importance=0.8, confidence_score=0.9)
+
+    confirm = await manager.confirm_conflict(
+        portal_id="p1",
+        user_id="u1",
+        entry_id=m1.id,
+        note="用户确认预算是100万",
+    )
+    assert confirm["updated"] is True
+    assert confirm["conflict_status"] == "confirmed"
+    assert m2.id in confirm["resolved_conflict_ids"]
+
+    pending = await manager.list_pending_conflicts("p1", "u1")
+    assert pending == []
+
+    resolve = await manager.resolve_conflict(
+        portal_id="p1",
+        user_id="u1",
+        entry_id=m1.id,
+        note="冲突已人工处理",
+        clear_links=True,
+    )
+    assert resolve["updated"] is True
+    assert resolve["conflict_status"] == "resolved"
+
+    all_memories = await manager.list_all("p1", "u1")
+    confirmed_after = next(x for x in all_memories if x.id == m1.id)
+    assert confirmed_after.conflict_with == []
+    assert confirmed_after.conflict_status == "resolved"
 
 
 @pytest.mark.asyncio
@@ -423,3 +512,265 @@ async def test_portal_chat_pre_generation_safety_scan_blocks(tmp_path):
 
     assert any(e.type.value == "safety_blocked" for e in events)
     assert any(e.type.value == "content" and "生成前拦截" in (e.delta or "") for e in events)
+
+
+@pytest.mark.asyncio
+async def test_memory_retrieve_intent_weight_prefers_preference(tmp_path):
+    storage = await _create_storage(tmp_path)
+    manager = PortalMemoryManager(storage)
+
+    await manager.add(
+        "p1",
+        "u1",
+        "用户偏好：喜欢正式商务语气回复",
+        memory_type="preference",
+        importance=0.6,
+    )
+    await manager.add(
+        "p1",
+        "u1",
+        "事实：公司成立于2018年",
+        memory_type="fact",
+        importance=0.95,
+    )
+
+    pref_query = await manager.retrieve(
+        portal_id="p1",
+        user_id="u1",
+        query="用户更喜欢什么语气风格？",
+        top_k=1,
+        query_intent="preference_lookup",
+    )
+    assert pref_query
+    assert pref_query[0].memory_type == "preference"
+
+
+@pytest.mark.asyncio
+async def test_memory_retrieve_semanticish_synonym_improves_recall(tmp_path):
+    storage = await _create_storage(tmp_path)
+    manager = PortalMemoryManager(storage)
+
+    await manager.add(
+        "p1",
+        "u1",
+        "差旅报销流程：先在系统提交费用单，再由财务审批",
+        memory_type="context",
+        importance=0.85,
+    )
+
+    results = await manager.retrieve(
+        portal_id="p1",
+        user_id="u1",
+        query="reimbursement 操作步骤",
+        top_k=3,
+        query_intent="task_continuation",
+    )
+    assert results
+    assert any("差旅报销流程" in item.content for item in results)
+
+
+@pytest.mark.asyncio
+async def test_memory_near_duplicate_auto_merge_and_unmerge_keeps_source_index(tmp_path):
+    storage = await _create_storage(tmp_path)
+    manager = PortalMemoryManager(storage)
+
+    canonical = await manager.add(
+        "p1",
+        "u1",
+        "用户偏好：回复尽量使用中文",
+        memory_type="preference",
+        importance=0.75,
+        source_session_id="s1",
+    )
+    merged = await manager.add(
+        "p1",
+        "u1",
+        "用户偏好：回复尽量使用中文。",
+        memory_type="preference",
+        importance=0.70,
+        source_session_id="s2",
+    )
+
+    assert merged.id == canonical.id
+    visible = await manager.list_all("p1", "u1")
+    assert len(visible) == 1
+    assert len(visible[0].merged_from) == 1
+    source_ids = {idx.get("source_entry_id") for idx in visible[0].source_index}
+    assert len(source_ids) == 2
+    assert {"s1", "s2"} <= {idx.get("source_session_id") for idx in visible[0].source_index}
+
+    all_entries = await manager._load_all_entries("p1", "u1")
+    child = next(item for item in all_entries if item.id != visible[0].id)
+    assert child.merged_into == visible[0].id
+
+    rollback = await manager.unmerge("p1", "u1", visible[0].id)
+    assert rollback["updated"] is True
+    assert child.id in rollback["detached_ids"]
+
+    after = await manager.list_all("p1", "u1")
+    assert len(after) == 2
+
+
+@pytest.mark.asyncio
+async def test_memory_batch_merge_near_duplicates(tmp_path):
+    storage = await _create_storage(tmp_path)
+    manager = PortalMemoryManager(storage)
+
+    e1 = PortalMemoryEntry(
+        id="m1",
+        portal_id="p1",
+        user_id="u1",
+        content="报销流程：先提交费用单再审批",
+        memory_type="context",
+        importance=0.7,
+        source_session_id="seed-1",
+    )
+    e2 = PortalMemoryEntry(
+        id="m2",
+        portal_id="p1",
+        user_id="u1",
+        content="费用报销流程：先提交费用单，然后财务审批",
+        memory_type="context",
+        importance=0.8,
+        source_session_id="seed-2",
+    )
+    await manager._save_entry(e1)
+    await manager._save_entry(e2)
+
+    merged = await manager.merge_near_duplicates("p1", "u1", similarity_threshold=0.75)
+    assert merged["merged_count"] == 1
+
+    visible = await manager.list_all("p1", "u1")
+    assert len(visible) == 1
+    assert len(visible[0].source_index) == 2
+
+
+@pytest.mark.asyncio
+async def test_memory_prune_archives_instead_of_delete_and_supports_restore(tmp_path):
+    storage = await _create_storage(tmp_path)
+    manager = PortalMemoryManager(storage)
+
+    hot = await manager.add("p1", "u1", "长期偏好：中文回复", importance=0.95, memory_type="preference")
+    warm = await manager.add("p1", "u1", "中期上下文：Q2预算评审", importance=0.65, memory_type="context")
+    cold = await manager.add("p1", "u1", "临时信息：周一提醒", importance=0.20, memory_type="context")
+
+    archived_count = await manager.prune("p1", "u1", max_entries=2, importance_threshold=0.6)
+    assert archived_count == 1
+
+    active = await manager.list_all("p1", "u1")
+    assert {m.id for m in active} == {hot.id, warm.id}
+
+    archived = await manager.list_archived("p1", "u1", query="提醒", top_k=10)
+    assert len(archived) == 1
+    assert archived[0].id == cold.id
+    assert archived[0].archived is True
+    assert archived[0].archive_reason == "capacity_prune"
+
+    restored = await manager.restore_archived("p1", "u1", cold.id)
+    assert restored["updated"] is True
+    assert restored["archived"] is False
+    assert restored["restore_count"] == 1
+
+    active_after_restore = await manager.list_all("p1", "u1")
+    assert {m.id for m in active_after_restore} == {hot.id, warm.id, cold.id}
+
+
+@pytest.mark.asyncio
+async def test_memory_retrieve_auto_archives_expired_entries(tmp_path):
+    storage = await _create_storage(tmp_path)
+    manager = PortalMemoryManager(storage)
+
+    entry = await manager.add("p1", "u1", "将过期的低价值记忆", importance=0.1, memory_type="context")
+    entry.expires_at = datetime.now() - timedelta(minutes=1)
+    await manager._save_entry(entry)
+
+    results = await manager.retrieve("p1", "u1", query="过期", top_k=10)
+    assert all(item.id != entry.id for item in results)
+
+    archived = await manager.list_archived("p1", "u1", query="过期", top_k=10)
+    assert archived
+    assert archived[0].id == entry.id
+    assert (archived[0].archive_reason or "").startswith("ttl_expired:")
+
+
+@pytest.mark.asyncio
+async def test_memory_observability_dashboard_records_strategy_trace(tmp_path):
+    storage = await _create_storage(tmp_path)
+    manager = PortalMemoryManager(storage)
+
+    await manager.add("p1", "u1", "差旅报销流程：提交费用单后财务审批", importance=0.9, memory_type="context")
+    await manager.retrieve(
+        portal_id="p1",
+        user_id="u1",
+        query="reimbursement 步骤",
+        top_k=5,
+        session_id="s-ob-1",
+        retrieval_strategy="semantic_first",
+        strategy_decision={"source": "user_rule", "rule_id": "user:0", "version": 3},
+        request_source="memory_api",
+    )
+
+    dashboard = await manager.get_retrieval_observability_dashboard(
+        portal_id="p1",
+        user_id="u1",
+        session_id="s-ob-1",
+        hours=24,
+        limit=20,
+    )
+    assert dashboard["metrics"]["total_queries"] == 1
+    assert dashboard["metrics"]["strategy_distribution"]["semantic_first"] == 1
+    assert dashboard["metrics"]["strategy_source_distribution"]["user_rule"] == 1
+    assert dashboard["traces"]
+    assert dashboard["traces"][0]["session_id"] == "s-ob-1"
+    assert dashboard["traces"][0]["strategy"] == "semantic_first"
+
+
+@pytest.mark.asyncio
+async def test_portal_service_retrieval_strategy_grayscale_precedence(tmp_path):
+    storage = await _create_storage(tmp_path)
+    cfg = SuperPortalConfig(
+        id="portal-gray",
+        name="PortalGray",
+        workflow_ids=["wf1"],
+        memory_enabled=True,
+        retrieval_strategy_default="balanced",
+        retrieval_strategy_grayscale={
+            "enabled": True,
+            "version": 2,
+            "session_rules": [
+                {"session_id": "s-hit", "strategy": "lexical_first", "note": "session-first"}
+            ],
+            "user_rules": [
+                {"user_id": "u1", "strategy": "semantic_first", "note": "user-level"}
+            ],
+            "portal_rule": {"traffic_ratio": 0.0, "strategy": "semantic_first", "salt": "v2"},
+        },
+    )
+    service = PortalService(
+        config=cfg,
+        workflow_manager=cast(Any, _DummyWorkflowManager()),
+        storage=storage,
+    )
+    await service._memory.add(
+        portal_id="portal-gray",
+        user_id="u1",
+        content="报销流程：先提交费用单",
+        memory_type="context",
+        importance=0.8,
+    )
+
+    _ = await service.get_memories(user_id="u1", query="报销", top_k=5, session_id="s-hit")
+    _ = await service.get_memories(user_id="u1", query="报销", top_k=5, session_id="s-miss")
+
+    session_dashboard = await service.get_memory_observability_dashboard(
+        user_id="u1",
+        session_id="s-hit",
+    )
+    user_dashboard = await service.get_memory_observability_dashboard(
+        user_id="u1",
+        session_id="s-miss",
+    )
+    assert session_dashboard["traces"][0]["strategy"] == "lexical_first"
+    assert session_dashboard["traces"][0]["strategy_source"] == "session_rule"
+    assert user_dashboard["traces"][0]["strategy"] == "semantic_first"
+    assert user_dashboard["traces"][0]["strategy_source"] == "user_rule"
