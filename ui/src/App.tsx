@@ -5,19 +5,21 @@ import WorkflowList from './components/WorkflowList';
 import SettingsPanel from './components/SettingsPanel';
 import PortalList from './components/PortalList';
 import PortalChat from './components/PortalChat';
+import RootPortalChat from './components/RootPortalChat';
 import type { Portal } from './components/PortalList';
 import { ToastProvider } from './components/ToastProvider';
 import styles from './App.module.css';
 
 const App: React.FC = () => {
-  const [selectedMenu, setSelectedMenu] = useState('workflows');
+  const [selectedMenu, setSelectedMenu] = useState('root_portal');
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
   const [chatPortal, setChatPortal] = useState<Portal | null>(null);
 
   const menuItems = [
+    { key: 'root_portal', label: 'AI助手',     icon: <FiZap /> },
     { key: 'workflows', label: '工作流列表',   icon: <FiList /> },
-    { key: 'portals',   label: '超级入口',     icon: <FiZap /> },
-    { key: 'plugins',   label: '插件管理',     icon: <FiCpu /> },
+    { key: 'portals',   label: '超级入口',     icon: <FiCpu /> },
+    { key: 'plugins',   label: '插件管理',     icon: <FiSettings /> },
     { key: 'settings',  label: '系统设置',     icon: <FiSettings /> },
   ];
 
@@ -28,6 +30,9 @@ const App: React.FC = () => {
 
   const renderContent = () => {
     switch (selectedMenu) {
+      case 'root_portal':
+        return <RootPortalChat />;
+
       case 'editor':
         return (
           <WorkflowEditor
@@ -73,7 +78,7 @@ const App: React.FC = () => {
           <SettingsPanel
             visible={true}
             isPage={true}
-            onClose={() => setSelectedMenu('workflows')}
+            onClose={() => setSelectedMenu('root_portal')}
           />
         );
 

@@ -928,6 +928,11 @@ export const api = {
 
   // ============== Portal (Super Portal) API ==============
 
+  async getDefaultPortal(): Promise<any> {
+    const response = await client.get('/api/portals/default');
+    return response.data;
+  },
+
   async listPortals(): Promise<any[]> {
     const response = await client.get('/api/portals');
     return response.data;
