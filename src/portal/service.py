@@ -43,12 +43,21 @@ from .memory import (
     PortalMemoryManager,
 )
 from .safety import PreGenerationSafetyScanner
+from .trajectory import TrajectoryPool, has_strong_signal
 
 logger = logging.getLogger(__name__)
 
 PORTAL_COLLECTION = "portals"
 SESSION_COLLECTION = "portal_sessions"
 SAFETY_BLOCK_MESSAGE = "当前请求触发安全策略，已在生成前拦截。请移除潜在注入/敏感指令后重试。"
+NO_WORKFLOW_FALLBACK_DISABLED_MESSAGE = (
+    "当前入口未配置可用工作流，且已关闭 fallback_to_copilot。"
+    "请先绑定/发布工作流，或开启 fallback_to_copilot 后重试。"
+)
+NO_MATCH_FALLBACK_DISABLED_MESSAGE = (
+    "未匹配到合适工作流，且已关闭 fallback_to_copilot。"
+    "请补充更明确的需求，或开启 fallback_to_copilot 后重试。"
+)
 
 SYNTHESIS_SYSTEM_PROMPT = """You are a helpful assistant that synthesises results from multiple specialised workflows into a single, coherent, and well-formatted response.
 
@@ -59,6 +68,22 @@ Instructions:
 - Use Markdown formatting where appropriate.
 - Address the user directly.
 """
+
+# Default backbone system prompt for Root Portal
+DEFAULT_BACKBONE_SYSTEM_PROMPT = (
+    "You are a helpful AI assistant. Answer the user's question directly, "
+    "clearly, and concisely. Use Markdown formatting where appropriate."
+)
+
+# Singleton trajectory pool (shared across all portal services)
+_global_trajectory_pool: Optional[TrajectoryPool] = None
+
+
+def get_trajectory_pool() -> TrajectoryPool:
+    global _global_trajectory_pool
+    if _global_trajectory_pool is None:
+        _global_trajectory_pool = TrajectoryPool()
+    return _global_trajectory_pool
 
 
 class PortalService:
@@ -289,188 +314,235 @@ class PortalService:
 
         # 4. Get available workflows
         available_wfs = await self._get_available_workflows()
-        if not available_wfs:
-            session.messages.append(PortalConversationMessage(
-                role="user", content=user_message,
-            ))
-            session.messages.append(PortalConversationMessage(
-                role="assistant",
-                content="⚠️ 当前超级入口还没有绑定任何工作流，请先在管理界面选择并绑定工作流。",
-            ))
-            await self._save_session(session)
-            yield PortalEvent(
-                type=PortalEventType.ERROR,
-                session_id=session_id,
-                portal_id=self.config.id,
-                error="No workflows bound to this portal",
-            )
-            return
 
-        # 5. Intent understanding (using the workflow-level alias)
-        intent_result = await intent_svc.understand_workflows(
-            user_query=user_message,
-            available_workflows=available_wfs,
-            conversation_history=history,
-            memories=memories,
-            memory_snapshot=memory_snapshot,
-            session_retrievals=session_retrievals,
-        )
-
-        yield PortalEvent(
-            type=PortalEventType.INTENT_UNDERSTOOD,
-            session_id=session_id,
-            portal_id=self.config.id,
-            intent=intent_result,
-        )
-
-        # If clarification needed, just ask
-        if intent_result.clarification_needed:
-            q = intent_result.clarification_question or "能请您进一步说明需求吗？"
-            session.messages.append(PortalConversationMessage(role="user", content=user_message))
-            session.messages.append(PortalConversationMessage(role="assistant", content=q))
-            await self._save_session(session)
-            yield PortalEvent(
-                type=PortalEventType.CONTENT,
-                session_id=session_id,
-                portal_id=self.config.id,
-                delta=q,
-            )
-            yield PortalEvent(
-                type=PortalEventType.COMPLETE,
-                session_id=session_id,
-                portal_id=self.config.id,
-            )
-            return
-
-        # 6. Execute workflows (group by priority, execute same-priority in parallel)
-        workflow_results: Dict[str, str] = {}  # workflow_id → result text
-
-        plans_by_priority: Dict[int, List[WorkflowDispatchPlan]] = {}
-        for plan in intent_result.dispatch_plans:
-            plans_by_priority.setdefault(plan.priority, []).append(plan)
-
+        # Decide path: workflow dispatch vs backbone direct reply
+        use_backbone = False
+        direct_reply_when_fallback_disabled: Optional[str] = None
+        intent_result: Optional[IntentUnderstandingResult] = None
         dispatched_workflow_ids: List[str] = []
+        workflow_results: Dict[str, str] = {}
 
-        for priority in sorted(plans_by_priority.keys()):
-            group = plans_by_priority[priority]
-
-            # Emit dispatch start events
-            for plan in group:
-                dispatched_workflow_ids.append(plan.workflow_id)
-                yield PortalEvent(
-                    type=PortalEventType.WORKFLOW_DISPATCH_START,
-                    session_id=session_id,
-                    portal_id=self.config.id,
-                    workflow_id=plan.workflow_id,
-                    workflow_name=plan.workflow_name,
-                )
-
-            # Execute in parallel within the same priority group
-            tasks = [
-                self._run_workflow(plan.workflow_id, plan.sub_query)
-                for plan in group
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for plan, result in zip(group, results):
-                if isinstance(result, BaseException):
-                    result_text = f"[工作流 {plan.workflow_name} 执行出错: {result}]"
-                else:
-                    result_text = result or "(无输出)"
-
-                workflow_results[plan.workflow_id] = result_text
-
-                yield PortalEvent(
-                    type=PortalEventType.WORKFLOW_DISPATCH_RESULT,
-                    session_id=session_id,
-                    portal_id=self.config.id,
-                    workflow_id=plan.workflow_id,
-                    workflow_name=plan.workflow_name,
-                    workflow_result=result_text[:500],  # preview in event
-                )
-
-        # 7. Pre-generation safety scan
-        safety = self.pre_generation_safety_scan(
-            user_query=user_message,
-            intent=intent_result.understood_intent,
-            workflow_results=workflow_results,
-            memories=memories,
-            memory_snapshot=memory_snapshot,
-        )
-        blocked_by_safety = safety.blocked
-
-        if blocked_by_safety:
-            yield PortalEvent(
-                type=PortalEventType.SAFETY_BLOCKED,
-                session_id=session_id,
-                portal_id=self.config.id,
-                metadata=safety.model_dump(),
-            )
-            yield PortalEvent(
-                type=PortalEventType.CONTENT,
-                session_id=session_id,
-                portal_id=self.config.id,
-                delta=SAFETY_BLOCK_MESSAGE,
-            )
-            final_answer_for_session = SAFETY_BLOCK_MESSAGE
+        if not available_wfs:
+            # No workflows → Backbone direct reply (if enabled)
+            if self.config.fallback_to_copilot:
+                use_backbone = True
+            else:
+                direct_reply_when_fallback_disabled = NO_WORKFLOW_FALLBACK_DISABLED_MESSAGE
         else:
-            # 8. Synthesise final answer
-            yield PortalEvent(
-                type=PortalEventType.SYNTHESIS_START,
-                session_id=session_id,
-                portal_id=self.config.id,
-            )
-
-            final_answer = await self._synthesise(
-                client=client,
+            # 5. Intent understanding (using the workflow-level alias)
+            intent_result = await intent_svc.understand_workflows(
                 user_query=user_message,
-                intent=intent_result.understood_intent,
-                workflow_results=workflow_results,
+                available_workflows=available_wfs,
+                conversation_history=history,
                 memories=memories,
                 memory_snapshot=memory_snapshot,
                 session_retrievals=session_retrievals,
-                history=history,
-                stream_callback=None,  # handled below
             )
 
-            # Stream final answer character by character (chunked)
+            yield PortalEvent(
+                type=PortalEventType.INTENT_UNDERSTOOD,
+                session_id=session_id,
+                portal_id=self.config.id,
+                intent=intent_result,
+            )
+
+            # If clarification needed, just ask
+            if intent_result.clarification_needed:
+                q = intent_result.clarification_question or "能请您进一步说明需求吗？"
+                session.messages.append(PortalConversationMessage(role="user", content=user_message))
+                session.messages.append(PortalConversationMessage(role="assistant", content=q))
+                await self._save_session(session)
+                yield PortalEvent(
+                    type=PortalEventType.CONTENT,
+                    session_id=session_id,
+                    portal_id=self.config.id,
+                    delta=q,
+                )
+                yield PortalEvent(
+                    type=PortalEventType.COMPLETE,
+                    session_id=session_id,
+                    portal_id=self.config.id,
+                )
+                return
+
+            # No dispatch plans → Backbone fallback
+            if not intent_result.dispatch_plans:
+                if self.config.fallback_to_copilot:
+                    use_backbone = True
+                else:
+                    direct_reply_when_fallback_disabled = NO_MATCH_FALLBACK_DISABLED_MESSAGE
+            else:
+                # 6. Execute workflows (group by priority, parallel within group)
+                plans_by_priority: Dict[int, List[WorkflowDispatchPlan]] = {}
+                for plan in intent_result.dispatch_plans:
+                    plans_by_priority.setdefault(plan.priority, []).append(plan)
+
+                for priority in sorted(plans_by_priority.keys()):
+                    group = plans_by_priority[priority]
+
+                    for plan in group:
+                        dispatched_workflow_ids.append(plan.workflow_id)
+                        yield PortalEvent(
+                            type=PortalEventType.WORKFLOW_DISPATCH_START,
+                            session_id=session_id,
+                            portal_id=self.config.id,
+                            workflow_id=plan.workflow_id,
+                            workflow_name=plan.workflow_name,
+                        )
+
+                    tasks = [
+                        self._run_workflow(plan.workflow_id, plan.sub_query)
+                        for plan in group
+                    ]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    for plan, result in zip(group, results):
+                        if isinstance(result, BaseException):
+                            result_text = f"[工作流 {plan.workflow_name} 执行出错: {result}]"
+                        else:
+                            result_text = result or "(无输出)"
+
+                        workflow_results[plan.workflow_id] = result_text
+
+                        yield PortalEvent(
+                            type=PortalEventType.WORKFLOW_DISPATCH_RESULT,
+                            session_id=session_id,
+                            portal_id=self.config.id,
+                            workflow_id=plan.workflow_id,
+                            workflow_name=plan.workflow_name,
+                            workflow_result=result_text[:500],
+                        )
+
+        # 7. Generate response — Backbone direct or Synthesis
+        if use_backbone:
+            # Backbone Agent direct reply (no workflow results)
             if stream:
-                async for chunk in self._stream_synthesis(
+                backbone_chunks: List[str] = []
+                async for chunk in self._backbone_reply_stream(
                     client=client,
                     user_query=user_message,
-                    intent=intent_result.understood_intent,
-                    workflow_results=workflow_results,
                     memories=memories,
                     memory_snapshot=memory_snapshot,
-                    session_retrievals=session_retrievals,
                     history=history,
                 ):
+                    backbone_chunks.append(chunk)
                     yield PortalEvent(
                         type=PortalEventType.CONTENT,
                         session_id=session_id,
                         portal_id=self.config.id,
                         delta=chunk,
                     )
-                final_answer_for_session = await self._synthesise(
+                final_answer_for_session = "".join(backbone_chunks)
+            else:
+                final_answer_for_session = await self._backbone_reply(
                     client=client,
                     user_query=user_message,
-                    intent=intent_result.understood_intent,
+                    memories=memories,
+                    memory_snapshot=memory_snapshot,
+                    history=history,
+                )
+                yield PortalEvent(
+                    type=PortalEventType.CONTENT,
+                    session_id=session_id,
+                    portal_id=self.config.id,
+                    delta=final_answer_for_session,
+                )
+            blocked_by_safety = False
+        elif direct_reply_when_fallback_disabled is not None:
+            final_answer_for_session = direct_reply_when_fallback_disabled
+            yield PortalEvent(
+                type=PortalEventType.CONTENT,
+                session_id=session_id,
+                portal_id=self.config.id,
+                delta=final_answer_for_session,
+            )
+            blocked_by_safety = False
+        else:
+            # Pre-generation safety scan
+            understood_intent = intent_result.understood_intent if intent_result else ""
+            safety = self.pre_generation_safety_scan(
+                user_query=user_message,
+                intent=understood_intent,
+                workflow_results=workflow_results,
+                memories=memories,
+                memory_snapshot=memory_snapshot,
+            )
+            blocked_by_safety = safety.blocked
+
+            if blocked_by_safety:
+                yield PortalEvent(
+                    type=PortalEventType.SAFETY_BLOCKED,
+                    session_id=session_id,
+                    portal_id=self.config.id,
+                    metadata=safety.model_dump(),
+                )
+                yield PortalEvent(
+                    type=PortalEventType.CONTENT,
+                    session_id=session_id,
+                    portal_id=self.config.id,
+                    delta=SAFETY_BLOCK_MESSAGE,
+                )
+                final_answer_for_session = SAFETY_BLOCK_MESSAGE
+            else:
+                # 8. Synthesise final answer
+                yield PortalEvent(
+                    type=PortalEventType.SYNTHESIS_START,
+                    session_id=session_id,
+                    portal_id=self.config.id,
+                )
+
+                understood_intent_str = intent_result.understood_intent if intent_result else ""
+
+                final_answer = await self._synthesise(
+                    client=client,
+                    user_query=user_message,
+                    intent=understood_intent_str,
                     workflow_results=workflow_results,
                     memories=memories,
                     memory_snapshot=memory_snapshot,
                     session_retrievals=session_retrievals,
                     history=history,
+                    stream_callback=None,
                 )
-            else:
-                yield PortalEvent(
-                    type=PortalEventType.CONTENT,
-                    session_id=session_id,
-                    portal_id=self.config.id,
-                    delta=final_answer,
-                )
-                final_answer_for_session = final_answer
 
-        # 8. Update session
+                # Stream final answer character by character (chunked)
+                if stream:
+                    async for chunk in self._stream_synthesis(
+                        client=client,
+                        user_query=user_message,
+                        intent=understood_intent_str,
+                        workflow_results=workflow_results,
+                        memories=memories,
+                        memory_snapshot=memory_snapshot,
+                        session_retrievals=session_retrievals,
+                        history=history,
+                    ):
+                        yield PortalEvent(
+                            type=PortalEventType.CONTENT,
+                            session_id=session_id,
+                            portal_id=self.config.id,
+                            delta=chunk,
+                        )
+                    final_answer_for_session = await self._synthesise(
+                        client=client,
+                        user_query=user_message,
+                        intent=understood_intent_str,
+                        workflow_results=workflow_results,
+                        memories=memories,
+                        memory_snapshot=memory_snapshot,
+                        session_retrievals=session_retrievals,
+                        history=history,
+                    )
+                else:
+                    yield PortalEvent(
+                        type=PortalEventType.CONTENT,
+                        session_id=session_id,
+                        portal_id=self.config.id,
+                        delta=final_answer,
+                    )
+                    final_answer_for_session = final_answer
+
+        # 9. Update session
         session.messages.append(PortalConversationMessage(
             role="user",
             content=user_message,
@@ -487,7 +559,7 @@ class PortalService:
 
         await self._save_session(session)
 
-        # 9. Extract and store memories (non-blocking)
+        # 10. Extract and store memories (non-blocking)
         if self.config.memory_enabled and not blocked_by_safety:
             asyncio.create_task(self._extract_memories(
                 client=client,
@@ -495,6 +567,16 @@ class PortalService:
                 user_message=user_message,
                 assistant_response=final_answer_for_session,
                 user_id=user_id,
+            ))
+
+        # 11. Extract trajectory signals (non-blocking, L1 precipitation)
+        if not blocked_by_safety:
+            asyncio.create_task(self._extract_trajectory_bg(
+                session_id=session_id,
+                user_message=user_message,
+                assistant_response=final_answer_for_session,
+                dispatched_workflow_ids=dispatched_workflow_ids,
+                workflow_results=workflow_results,
             ))
 
         yield PortalEvent(
@@ -771,8 +853,15 @@ class PortalService:
         return self._intent_svc
 
     async def _get_available_workflows(self) -> List[Dict[str, Any]]:
-        """Return metadata for all workflows bound to this portal."""
+        """Return metadata for all workflows bound to this portal.
+
+        If auto_include_published is True, dynamically include all published
+        workflows instead of only those in workflow_ids.
+        """
         result = []
+        seen_ids: set = set()
+
+        # Explicit bindings
         for wf_id in self.config.workflow_ids:
             wf = await self._wf_manager.get_workflow(wf_id)
             if wf:
@@ -781,6 +870,23 @@ class PortalService:
                     "name": wf.name,
                     "description": wf.description,
                 })
+                seen_ids.add(wf.id)
+
+        # Auto-include published workflows
+        if self.config.auto_include_published:
+            published = await self._wf_manager.list_published()
+            for pub in published:
+                wf_id = pub.get("workflow_id") or pub.get("id", "")
+                if wf_id and wf_id not in seen_ids:
+                    wf = await self._wf_manager.get_workflow(wf_id)
+                    if wf:
+                        result.append({
+                            "id": wf.id,
+                            "name": wf.name,
+                            "description": wf.description,
+                        })
+                        seen_ids.add(wf.id)
+
         return result
 
     async def _run_workflow(self, workflow_id: str, sub_query: str) -> str:
@@ -795,6 +901,162 @@ class PortalService:
         except Exception as e:
             logger.error(f"[Portal] Workflow {workflow_id} execution error: {e}")
             return f"[执行异常: {e}]"
+
+    async def _backbone_reply(
+        self,
+        client,
+        user_query: str,
+        memories: List[PortalMemoryEntry],
+        memory_snapshot: str,
+        history: List[Dict[str, str]],
+    ) -> str:
+        """Backbone Agent direct reply (non-streaming) — used when no workflow matches."""
+        system_prompt = self.config.backbone_system_prompt or DEFAULT_BACKBONE_SYSTEM_PROMPT
+        memory_block = memory_snapshot.strip() or ""
+        if memory_block:
+            system_prompt += f"\n\nUser memory context:\n{memory_block}"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            *history[-6:],
+            {"role": "user", "content": user_query},
+        ]
+        try:
+            resp = await client.chat.completions.create(
+                model=self.config.model,
+                temperature=self.config.temperature,
+                messages=messages,
+                max_tokens=2048,
+            )
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            logger.error(f"[Portal] Backbone reply failed: {e}")
+            return f"抱歉，处理您的请求时遇到了问题: {e}"
+
+    async def _backbone_reply_stream(
+        self,
+        client,
+        user_query: str,
+        memories: List[PortalMemoryEntry],
+        memory_snapshot: str,
+        history: List[Dict[str, str]],
+    ) -> AsyncIterator[str]:
+        """Backbone Agent streaming reply — used when no workflow matches."""
+        system_prompt = self.config.backbone_system_prompt or DEFAULT_BACKBONE_SYSTEM_PROMPT
+        memory_block = memory_snapshot.strip() or ""
+        if memory_block:
+            system_prompt += f"\n\nUser memory context:\n{memory_block}"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            *history[-6:],
+            {"role": "user", "content": user_query},
+        ]
+        try:
+            stream = await client.chat.completions.create(
+                model=self.config.model,
+                temperature=self.config.temperature,
+                messages=messages,
+                max_tokens=2048,
+                stream=True,
+            )
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as e:
+            logger.error(f"[Portal] Backbone stream reply failed: {e}")
+            yield f"抱歉，处理您的请求时遇到了问题: {e}"
+
+    async def _extract_trajectory_bg(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_response: str,
+        dispatched_workflow_ids: List[str],
+        workflow_results: Dict[str, str],
+    ) -> None:
+        """
+        Background task: L1 real-time trajectory signal extraction.
+
+        - Extracts lightweight stats (tool_call_count, unique_tool_count, etc.)
+        - Checks for strong signal keywords → triggers L3 immediate precipitation
+        - Otherwise stores in TrajectoryPool → accumulates for L2
+        """
+        try:
+            signals: Dict[str, Any] = {
+                "tool_call_count": len(dispatched_workflow_ids),
+                "unique_tool_count": len(set(dispatched_workflow_ids)),
+                "error_count": sum(
+                    1 for v in workflow_results.values()
+                    if "[错误" in v or "[执行异常" in v
+                ),
+                "step_count": len(workflow_results),
+            }
+
+            # Check for strong signal keywords in user message
+            if has_strong_signal(user_message):
+                signals["strong_signal"] = True
+                signals["precipitation_level"] = "L3"
+                logger.info(
+                    f"[Portal] Strong signal detected in session {session_id}, "
+                    f"triggering L3 immediate precipitation"
+                )
+                # L3: immediately trigger artifact learning for this session
+                try:
+                    from ..artifacts import get_artifact_factory_service
+                    factory = get_artifact_factory_service()
+                    await factory.run_periodic_learning_cycle(
+                        trajectories=[{
+                            "session_id": session_id,
+                            "user_id": "default",
+                            "messages": [
+                                {"role": "user", "content": user_message},
+                                {"role": "assistant", "content": assistant_response},
+                            ],
+                            "updated_at": datetime.now().isoformat(),
+                        }],
+                        min_cluster_size=1,
+                        dry_run=False,
+                    )
+                except Exception as e:
+                    logger.warning(f"[Portal] L3 precipitation failed: {e}")
+            else:
+                signals["precipitation_level"] = "L1"
+
+            # Store in trajectory pool for L2 accumulation
+            pool = get_trajectory_pool()
+            pool.add(session_id, signals)
+
+            # Check if we should trigger L2 learning cycle
+            if pool.should_trigger_learning():
+                entries = pool.drain()
+                logger.info(
+                    f"[Portal] TrajectoryPool threshold reached, "
+                    f"triggering L2 learning cycle with {len(entries)} entries"
+                )
+                try:
+                    from ..artifacts import get_artifact_factory_service
+                    factory = get_artifact_factory_service()
+                    trajectories = [
+                        {
+                            "session_id": e.session_id,
+                            "user_id": "default",
+                            "messages": [],
+                            "updated_at": datetime.now().isoformat(),
+                            "signals": e.signals,
+                        }
+                        for e in entries
+                    ]
+                    await factory.run_periodic_learning_cycle(
+                        trajectories=trajectories,
+                        min_cluster_size=2,
+                        dry_run=False,
+                    )
+                except Exception as e:
+                    logger.warning(f"[Portal] L2 learning cycle failed: {e}")
+
+        except Exception as e:
+            logger.error(f"[Portal] Trajectory extraction error: {e}")
 
     async def _synthesise(
         self,
@@ -1005,17 +1267,22 @@ class PortalManager:
         self._storage: Optional[StorageManager] = None
         self._wf_manager: Optional[WorkflowManager] = None
         self._loaded = False
+        self._ready_lock = asyncio.Lock()
+        self._portal_lock = asyncio.Lock()
 
     async def _ensure_ready(self):
-        if self._storage is None:
-            from ..storage import initialize_storage
-            self._storage = await initialize_storage()
-        if self._wf_manager is None:
-            self._wf_manager = get_workflow_manager()
-            await self._wf_manager._ensure_storage()
-        if not self._loaded:
-            await self._load_all()
-            self._loaded = True
+        if self._storage is not None and self._wf_manager is not None and self._loaded:
+            return
+        async with self._ready_lock:
+            if self._storage is None:
+                from ..storage import initialize_storage
+                self._storage = await initialize_storage()
+            if self._wf_manager is None:
+                self._wf_manager = get_workflow_manager()
+                await self._wf_manager._ensure_storage()
+            if not self._loaded:
+                await self._load_all()
+                self._loaded = True
 
     async def _load_all(self):
         try:
@@ -1028,9 +1295,47 @@ class PortalManager:
                     self._portals[cfg.id] = cfg
                 except Exception as e:
                     logger.warning(f"[PortalManager] Skipping malformed portal: {e}")
+            await self._normalize_default_portal_uniqueness_locked()
             logger.info(f"[PortalManager] Loaded {len(self._portals)} portals")
         except Exception as e:
             logger.error(f"[PortalManager] Load failed: {e}")
+
+    async def _unset_other_defaults_locked(self, keep_portal_id: str) -> None:
+        """Ensure only one portal keeps is_default=True. Caller must hold _portal_lock."""
+        changed = 0
+        now = datetime.now()
+        for cfg in self._portals.values():
+            if cfg.id != keep_portal_id and cfg.is_default:
+                cfg.is_default = False
+                cfg.updated_at = now
+                await self._save_config(cfg)
+                changed += 1
+        if changed:
+            logger.info(
+                f"[PortalManager] Cleared is_default on {changed} portal(s), keep={keep_portal_id}"
+            )
+
+    async def _normalize_default_portal_uniqueness_locked(self) -> None:
+        """
+        Repair duplicate defaults on load.
+
+        Keep the most recently updated default portal and clear others.
+        """
+        defaults = [cfg for cfg in self._portals.values() if cfg.is_default]
+        if len(defaults) <= 1:
+            return
+        defaults.sort(key=lambda c: (c.updated_at, c.created_at), reverse=True)
+        keeper = defaults[0]
+        changed = 0
+        for cfg in defaults[1:]:
+            cfg.is_default = False
+            cfg.updated_at = datetime.now()
+            await self._save_config(cfg)
+            changed += 1
+        logger.warning(
+            f"[PortalManager] Found {len(defaults)} default portals on load; "
+            f"kept {keeper.id}, reset {changed} duplicates"
+        )
 
     async def _save_config(self, config: SuperPortalConfig):
         if self._storage is None:
@@ -1045,7 +1350,7 @@ class PortalManager:
     # CRUD
     # ------------------------------------------------------------------
 
-    async def create_portal(
+    async def _create_portal_locked(
         self,
         name: str,
         description: str = "",
@@ -1063,10 +1368,12 @@ class PortalManager:
         memory_ttl_warm_importance: float = 0.5,
         retrieval_strategy_default: str = DEFAULT_RETRIEVAL_STRATEGY,
         retrieval_strategy_grayscale: Optional[Dict[str, Any]] = None,
+        is_default: bool = False,
+        auto_include_published: bool = False,
+        fallback_to_copilot: bool = True,
+        backbone_system_prompt: str = DEFAULT_BACKBONE_SYSTEM_PROMPT,
     ) -> SuperPortalConfig:
-        """Create and persist a new Super Portal configuration."""
-        await self._ensure_ready()
-
+        """Create and persist a new Super Portal configuration. Caller must hold _portal_lock."""
         config = SuperPortalConfig(
             id=str(uuid4()),
             name=name,
@@ -1090,12 +1397,67 @@ class PortalManager:
                 retrieval_strategy_grayscale
             ),
             api_key_access=f"portal_{secrets.token_urlsafe(24)}",
+            is_default=is_default,
+            auto_include_published=auto_include_published,
+            fallback_to_copilot=fallback_to_copilot,
+            backbone_system_prompt=backbone_system_prompt,
         )
 
         self._portals[config.id] = config
+        if config.is_default:
+            await self._unset_other_defaults_locked(config.id)
         await self._save_config(config)
         logger.info(f"[PortalManager] Created portal {config.id}: {name}")
         return config
+
+    async def create_portal(
+        self,
+        name: str,
+        description: str = "",
+        workflow_ids: Optional[List[str]] = None,
+        provider: str = "openai",
+        model: str = "gpt-4",
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        memory_enabled: bool = True,
+        global_memory_enabled: bool = False,
+        memory_ttl_hot_hours: int = 24 * 30,
+        memory_ttl_warm_hours: int = 24 * 14,
+        memory_ttl_cold_hours: int = 24 * 3,
+        memory_ttl_hot_importance: float = 0.8,
+        memory_ttl_warm_importance: float = 0.5,
+        retrieval_strategy_default: str = DEFAULT_RETRIEVAL_STRATEGY,
+        retrieval_strategy_grayscale: Optional[Dict[str, Any]] = None,
+        is_default: bool = False,
+        auto_include_published: bool = False,
+        fallback_to_copilot: bool = True,
+        backbone_system_prompt: str = DEFAULT_BACKBONE_SYSTEM_PROMPT,
+    ) -> SuperPortalConfig:
+        """Create and persist a new Super Portal configuration."""
+        await self._ensure_ready()
+        async with self._portal_lock:
+            return await self._create_portal_locked(
+                name=name,
+                description=description,
+                workflow_ids=workflow_ids,
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                memory_enabled=memory_enabled,
+                global_memory_enabled=global_memory_enabled,
+                memory_ttl_hot_hours=memory_ttl_hot_hours,
+                memory_ttl_warm_hours=memory_ttl_warm_hours,
+                memory_ttl_cold_hours=memory_ttl_cold_hours,
+                memory_ttl_hot_importance=memory_ttl_hot_importance,
+                memory_ttl_warm_importance=memory_ttl_warm_importance,
+                retrieval_strategy_default=retrieval_strategy_default,
+                retrieval_strategy_grayscale=retrieval_strategy_grayscale,
+                is_default=is_default,
+                auto_include_published=auto_include_published,
+                fallback_to_copilot=fallback_to_copilot,
+                backbone_system_prompt=backbone_system_prompt,
+            )
 
     async def get_portal(self, portal_id: str) -> Optional[SuperPortalConfig]:
         await self._ensure_ready()
@@ -1111,42 +1473,110 @@ class PortalManager:
         updates: Dict[str, Any],
     ) -> Optional[SuperPortalConfig]:
         await self._ensure_ready()
-        config = self._portals.get(portal_id)
-        if not config:
-            return None
+        async with self._portal_lock:
+            config = self._portals.get(portal_id)
+            if not config:
+                return None
 
-        allowed = {
-            "name", "description", "workflow_ids",
-            "provider", "model", "api_key", "base_url",
-            "memory_enabled", "max_memory_entries", "memory_importance_threshold",
-            "memory_ttl_hot_hours", "memory_ttl_warm_hours", "memory_ttl_cold_hours",
-            "memory_ttl_hot_importance", "memory_ttl_warm_importance",
-            "global_memory_enabled", "global_max_memory_entries",
-            "retrieval_strategy_default", "retrieval_strategy_grayscale",
-            "max_session_messages", "session_ttl_hours", "public",
-        }
-        for k, v in updates.items():
-            if k in allowed:
-                setattr(config, k, v)
+            allowed = {
+                "name", "description", "workflow_ids",
+                "provider", "model", "api_key", "base_url",
+                "memory_enabled", "max_memory_entries", "memory_importance_threshold",
+                "memory_ttl_hot_hours", "memory_ttl_warm_hours", "memory_ttl_cold_hours",
+                "memory_ttl_hot_importance", "memory_ttl_warm_importance",
+                "global_memory_enabled", "global_max_memory_entries",
+                "retrieval_strategy_default", "retrieval_strategy_grayscale",
+                "max_session_messages", "session_ttl_hours", "public",
+                "is_default", "auto_include_published", "fallback_to_copilot",
+                "backbone_system_prompt",
+            }
+            for k, v in updates.items():
+                if k in allowed:
+                    if k == "retrieval_strategy_default":
+                        v = PortalService._normalize_strategy_name(v)
+                    elif k == "retrieval_strategy_grayscale":
+                        v = PortalService._normalize_grayscale_config(v)
+                    setattr(config, k, v)
 
-        config.updated_at = datetime.now()
-        # Invalidate cached service so it picks up new config
-        self._services.pop(portal_id, None)
+            if config.is_default:
+                await self._unset_other_defaults_locked(portal_id)
+            config.updated_at = datetime.now()
+            # Invalidate cached service so it picks up new config
+            self._services.pop(portal_id, None)
 
-        await self._save_config(config)
-        return config
+            await self._save_config(config)
+            return config
 
     async def delete_portal(self, portal_id: str) -> bool:
         await self._ensure_ready()
         if self._storage is None:
             return False
-        if portal_id in self._portals:
-            del self._portals[portal_id]
-            self._services.pop(portal_id, None)
-            await self._storage.backend.delete(PORTAL_COLLECTION, portal_id)
-            logger.info(f"[PortalManager] Deleted portal {portal_id}")
-            return True
-        return False
+        async with self._portal_lock:
+            if portal_id in self._portals:
+                del self._portals[portal_id]
+                self._services.pop(portal_id, None)
+                await self._storage.backend.delete(PORTAL_COLLECTION, portal_id)
+                logger.info(f"[PortalManager] Deleted portal {portal_id}")
+                return True
+            return False
+
+    # ------------------------------------------------------------------
+    # Default Portal
+    # ------------------------------------------------------------------
+
+    async def get_default_portal(self) -> Optional[SuperPortalConfig]:
+        """Return the portal marked as is_default=True, if any."""
+        await self._ensure_ready()
+        defaults = [cfg for cfg in self._portals.values() if cfg.is_default]
+        if not defaults:
+            return None
+        defaults.sort(key=lambda c: (c.updated_at, c.created_at), reverse=True)
+        return defaults[0]
+
+    async def ensure_default_portal(self) -> SuperPortalConfig:
+        """
+        Ensure a default Root Portal exists.
+
+        If no portal has is_default=True, create one using LLM config
+        from the Copilot service.
+        """
+        await self._ensure_ready()
+        async with self._portal_lock:
+            existing = await self.get_default_portal()
+            if existing:
+                logger.info(f"[PortalManager] Default portal already exists: {existing.id}")
+                return existing
+
+            # Get LLM config from Copilot
+            provider = "openai"
+            model = "gpt-4"
+            api_key = None
+            base_url = None
+            try:
+                from ..copilot import get_copilot_service
+                copilot = get_copilot_service()
+                copilot_cfg = copilot.get_config()
+                provider = copilot_cfg.get("provider", provider)
+                model = copilot_cfg.get("model", model)
+                api_key = copilot_cfg.get("api_key", api_key)
+                base_url = copilot_cfg.get("base_url", base_url)
+            except Exception as e:
+                logger.warning(f"[PortalManager] Could not load Copilot config: {e}")
+
+            config = await self._create_portal_locked(
+                name="Root Portal",
+                description="系统默认入口，自带通用 AI 对话能力，自动纳入所有已发布工作流",
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                is_default=True,
+                auto_include_published=True,
+                fallback_to_copilot=True,
+                backbone_system_prompt=DEFAULT_BACKBONE_SYSTEM_PROMPT,
+            )
+            logger.info(f"[PortalManager] Created default Root Portal: {config.id}")
+            return config
 
     # ------------------------------------------------------------------
     # Service access

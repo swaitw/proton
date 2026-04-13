@@ -812,6 +812,12 @@ class SuperPortalConfig(BaseModel):
     max_session_messages: int = 50        # Keep last N messages per session
     session_ttl_hours: int = 24           # Inactive session expiry
 
+    # Root Portal settings
+    is_default: bool = False              # Mark as system default entry portal
+    auto_include_published: bool = False  # Auto-include all published workflows
+    fallback_to_copilot: bool = True      # Fallback to Copilot guidance when no workflow
+    backbone_system_prompt: str = "You are a helpful AI assistant. Answer the user's question directly, clearly, and concisely. Use Markdown formatting where appropriate."
+
     # Access control
     api_key_access: Optional[str] = None  # Portal-level API key
     public: bool = False                  # Allow access without api_key

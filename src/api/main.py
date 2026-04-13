@@ -359,7 +359,9 @@ async def lifespan(app: FastAPI):
         from ..portal import get_portal_manager
         portal_mgr = get_portal_manager()
         await portal_mgr._ensure_ready()
-        logger.info("Portal manager initialized")
+        # Ensure default Root Portal exists
+        await portal_mgr.ensure_default_portal()
+        logger.info("Portal manager initialized (default portal ensured)")
     except Exception as e:
         logger.warning(f"Failed to initialize portal manager: {e}")
 
@@ -2493,6 +2495,27 @@ def create_app() -> FastAPI:
                 description=request.description,
                 tags=request.tags
             )
+
+            # Auto-add to default portal if auto_include_published is enabled
+            try:
+                from ..portal import get_portal_manager
+                portal_mgr = get_portal_manager()
+                default_portal = await portal_mgr.get_default_portal()
+                if (
+                    default_portal
+                    and default_portal.auto_include_published
+                    and workflow_id not in default_portal.workflow_ids
+                ):
+                    updated_ids = list(default_portal.workflow_ids) + [workflow_id]
+                    await portal_mgr.update_portal(
+                        default_portal.id, {"workflow_ids": updated_ids}
+                    )
+                    logger.info(
+                        f"Auto-added workflow {workflow_id} to default portal {default_portal.id}"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to auto-add workflow to default portal: {e}")
+
             return {
                 "workflow_id": workflow_id,
                 "api_key": result.api_key,
@@ -2629,6 +2652,13 @@ def create_app() -> FastAPI:
         memory_ttl_warm_importance: float = 0.5
         retrieval_strategy_default: str = "balanced"
         retrieval_strategy_grayscale: Dict[str, Any] = Field(default_factory=dict)
+        is_default: bool = False
+        auto_include_published: bool = False
+        fallback_to_copilot: bool = True
+        backbone_system_prompt: str = (
+            "You are a helpful AI assistant. Answer the user's question directly, "
+            "clearly, and concisely. Use Markdown formatting where appropriate."
+        )
 
     class PortalChatRequest(BaseModel):
         """Request to chat with a Super Portal."""
@@ -2724,6 +2754,10 @@ def create_app() -> FastAPI:
             memory_ttl_warm_importance=request.memory_ttl_warm_importance,
             retrieval_strategy_default=request.retrieval_strategy_default,
             retrieval_strategy_grayscale=request.retrieval_strategy_grayscale,
+            is_default=request.is_default,
+            auto_include_published=request.auto_include_published,
+            fallback_to_copilot=request.fallback_to_copilot,
+            backbone_system_prompt=request.backbone_system_prompt,
         )
         return config.model_dump()
 
@@ -2734,6 +2768,19 @@ def create_app() -> FastAPI:
         mgr = get_portal_manager()
         portals = await mgr.list_portals()
         return [p.model_dump() for p in portals]
+
+    @app.get("/api/portals/default", summary="获取默认 Root Portal")
+    async def get_default_portal():
+        """
+        获取系统默认 Root Portal（没有则自动创建）。
+
+        Root Portal 是系统默认入口，自带通用 AI 对话能力（Backbone Agent），
+        无需绑定工作流即可直接对话。
+        """
+        from ..portal import get_portal_manager
+        mgr = get_portal_manager()
+        config = await mgr.ensure_default_portal()
+        return config.model_dump()
 
     @app.get("/api/portals/{portal_id}", summary="获取超级入口详情")
     async def get_portal(portal_id: str):
