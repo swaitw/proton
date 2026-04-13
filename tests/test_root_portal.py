@@ -45,6 +45,11 @@ def _reset_globals(monkeypatch, tmp_path):
     portal_service_module._global_portal_manager = None
     portal_service_module._global_trajectory_pool = None
 
+    # Mock MemPalaceClient to avoid MCP initialization errors during tests
+    from src.portal.mempalace_client import MemPalaceClient
+    monkeypatch.setattr(MemPalaceClient, "ensure_ready", AsyncMock(return_value=True))
+    monkeypatch.setattr(MemPalaceClient, "call", AsyncMock(return_value={"drawers": []}))
+
 
 # ===========================================================================
 # 1. Default portal auto-created on startup

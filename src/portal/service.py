@@ -13,7 +13,6 @@ Lifecycle of a single user turn:
 """
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -23,7 +22,9 @@ from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 from uuid import uuid4
 
+from ..core.context import ContextOffloader, ExecutionContext
 from ..core.models import (
+    ChatMessage,
     IntentUnderstandingResult,
     PortalConversationMessage,
     PortalEvent,
@@ -37,11 +38,8 @@ from ..core.models import (
 from ..orchestration.workflow import WorkflowManager, get_workflow_manager
 from ..storage.persistence import StorageManager, get_storage_manager
 from .intent import IntentUnderstandingService
-from .memory import (
-    DEFAULT_RETRIEVAL_STRATEGY,
-    SUPPORTED_RETRIEVAL_STRATEGIES,
-    PortalMemoryManager,
-)
+from .mempalace_client import MemPalaceClient
+from .mempalace_memory_provider import MemPalaceMemoryProvider
 from .safety import PreGenerationSafetyScanner
 from .trajectory import TrajectoryPool, has_strong_signal
 
@@ -86,6 +84,33 @@ def get_trajectory_pool() -> TrajectoryPool:
     return _global_trajectory_pool
 
 
+class PortalContextOffloader(ContextOffloader):
+    def __init__(self, provider: MemPalaceMemoryProvider, portal_id: str, user_id: str):
+        self.provider = provider
+        self.portal_id = portal_id
+        self.user_id = user_id
+        self.semaphore = asyncio.Semaphore(3)
+
+    async def offload(self, messages: List[ChatMessage], wing: str, room: str) -> Optional[Dict[str, Any]]:
+        async with self.semaphore:
+            content = "\n".join(f"[{m.role.value}] {m.content}" for m in messages)
+            drawer_id = await self.provider.write_archive(
+                portal_id=self.portal_id,
+                user_id=self.user_id,
+                wing=wing,
+                room=room,
+                content=content,
+            )
+            if drawer_id:
+                return {
+                    "wing": wing,
+                    "room": room,
+                    "drawer_id": drawer_id,
+                    "count": len(messages),
+                }
+            return None
+
+
 class PortalService:
     """
     Runtime service for a single Super Portal instance.
@@ -103,15 +128,22 @@ class PortalService:
         self.config = config
         self._wf_manager = workflow_manager
         self._storage = storage
-        self._memory = PortalMemoryManager(
-            storage,
-            ttl_policy={
-                "hot_hours": config.memory_ttl_hot_hours,
-                "warm_hours": config.memory_ttl_warm_hours,
-                "cold_hours": config.memory_ttl_cold_hours,
-                "hot_importance": config.memory_ttl_hot_importance,
-                "warm_importance": config.memory_ttl_warm_importance,
-            },
+        
+        client = MemPalaceClient(
+            palace_path=getattr(config, "mempalace_palace_path", None),
+            command=getattr(config, "mempalace_command", "mempalace"),
+            args=getattr(config, "mempalace_args", None),
+            env=getattr(config, "mempalace_env", None),
+        )
+        if str(getattr(config, "memory_provider", "mempalace")).strip().lower() not in ("mempalace", "mp"):
+            logger.warning(
+                "[Portal] memory_provider=%s is deprecated; forcing MemPalaceMemoryProvider",
+                getattr(config, "memory_provider", None),
+            )
+        self.memory_provider = MemPalaceMemoryProvider(
+            client=client,
+            wing_strategy=getattr(config, "mempalace_wing_strategy", "per_user"),
+            default_room=getattr(config, "mempalace_default_room", "general"),
         )
         self._safety_scanner = PreGenerationSafetyScanner()
         self._client = None   # lazy-initialised OpenAI client
@@ -141,104 +173,13 @@ class PortalService:
         return await self._load_session(session_id)
 
     @staticmethod
-    def _normalize_strategy_name(name: Optional[str]) -> str:
-        candidate = str(name or DEFAULT_RETRIEVAL_STRATEGY).strip().lower()
-        if candidate in SUPPORTED_RETRIEVAL_STRATEGIES:
-            return candidate
-        return DEFAULT_RETRIEVAL_STRATEGY
-
-    @staticmethod
-    def _normalize_grayscale_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        raw = config if isinstance(config, dict) else {}
-        session_rules = raw.get("session_rules")
-        if not isinstance(session_rules, list):
-            session_rules = []
-        user_rules = raw.get("user_rules")
-        if not isinstance(user_rules, list):
-            user_rules = []
-        portal_rule_raw = raw.get("portal_rule")
-        if not isinstance(portal_rule_raw, dict):
-            portal_rule_raw = {}
+    def _noop_retrieval_decision() -> Dict[str, Any]:
         return {
-            "enabled": bool(raw.get("enabled", False)),
-            "version": max(1, int(raw.get("version", 1))),
-            "session_rules": [r for r in session_rules if isinstance(r, dict)],
-            "user_rules": [r for r in user_rules if isinstance(r, dict)],
-            "portal_rule": {
-                "traffic_ratio": max(0.0, min(1.0, float(portal_rule_raw.get("traffic_ratio", 0.0)))),
-                "strategy": str(portal_rule_raw.get("strategy", "semantic_first")),
-                "salt": str(portal_rule_raw.get("salt", "v1")),
-                "note": portal_rule_raw.get("note"),
-            },
-        }
-
-    def _resolve_memory_retrieval_strategy(
-        self,
-        *,
-        user_id: str,
-        session_id: Optional[str],
-    ) -> Dict[str, Any]:
-        default_strategy = self._normalize_strategy_name(
-            getattr(self.config, "retrieval_strategy_default", DEFAULT_RETRIEVAL_STRATEGY)
-        )
-        grayscale = self._normalize_grayscale_config(
-            getattr(self.config, "retrieval_strategy_grayscale", None)
-        )
-        if not grayscale.get("enabled"):
-            return {
-                "strategy": default_strategy,
-                "source": "default",
-                "rule_id": None,
-                "note": None,
-                "version": int(grayscale.get("version", 1)),
-            }
-
-        for idx, rule in enumerate(grayscale.get("session_rules", [])):
-            target_session = str(rule.get("session_id", "")).strip()
-            if target_session and session_id and target_session == session_id:
-                return {
-                    "strategy": self._normalize_strategy_name(rule.get("strategy")),
-                    "source": "session_rule",
-                    "rule_id": f"session:{idx}",
-                    "note": rule.get("note"),
-                    "version": int(grayscale.get("version", 1)),
-                }
-
-        for idx, rule in enumerate(grayscale.get("user_rules", [])):
-            target_user = str(rule.get("user_id", "")).strip()
-            if target_user and target_user == user_id:
-                return {
-                    "strategy": self._normalize_strategy_name(rule.get("strategy")),
-                    "source": "user_rule",
-                    "rule_id": f"user:{idx}",
-                    "note": rule.get("note"),
-                    "version": int(grayscale.get("version", 1)),
-                }
-
-        portal_rule = grayscale.get("portal_rule", {})
-        traffic_ratio = max(0.0, min(1.0, float(portal_rule.get("traffic_ratio", 0.0))))
-        if traffic_ratio > 0:
-            salt = str(portal_rule.get("salt", "v1"))
-            bucket_input = f"{self.config.id}:{user_id}:{session_id or '-'}:{salt}"
-            bucket_hash = hashlib.sha256(bucket_input.encode("utf-8")).hexdigest()
-            bucket = int(bucket_hash[:8], 16) / 0xFFFFFFFF
-            if bucket < traffic_ratio:
-                return {
-                    "strategy": self._normalize_strategy_name(portal_rule.get("strategy")),
-                    "source": "portal_rule",
-                    "rule_id": "portal:traffic",
-                    "note": portal_rule.get("note"),
-                    "version": int(grayscale.get("version", 1)),
-                    "bucket": round(bucket, 6),
-                    "traffic_ratio": traffic_ratio,
-                }
-
-        return {
-            "strategy": default_strategy,
-            "source": "default_fallback",
+            "strategy": "semantic_first",
+            "source": "noop",
             "rule_id": None,
             "note": None,
-            "version": int(grayscale.get("version", 1)),
+            "version": 1,
         }
 
     async def chat(
@@ -275,30 +216,28 @@ class PortalService:
         # 2. Retrieve memories
         memories: List[PortalMemoryEntry] = []
         memory_snapshot = ""
-        retrieval_decision = self._resolve_memory_retrieval_strategy(
-            user_id=user_id,
-            session_id=session_id,
-        )
+        retrieval_decision = self._noop_retrieval_decision()
         if self.config.memory_enabled:
-            memories = await self._memory.retrieve(
-                portal_id=self.config.id,
-                user_id=user_id,
-                query=user_message,
-                top_k=10,
-                include_global=self.config.global_memory_enabled,
-                session_id=session_id,
-                retrieval_strategy=retrieval_decision["strategy"],
-                strategy_decision=retrieval_decision,
-                request_source="portal_chat",
-            )
-            memory_snapshot = await self._memory.bounded_snapshot(
-                portal_id=self.config.id,
-                user_id=user_id,
-                max_chars=1200,
-                max_entries=12,
-                min_importance=self.config.memory_importance_threshold,
-                include_global=self.config.global_memory_enabled,
-            )
+            try:
+                memories = await self.memory_provider.retrieve(
+                    portal_id=self.config.id,
+                    user_id=user_id,
+                    query=user_message,
+                    top_k=10,
+                    include_global=self.config.global_memory_enabled,
+                    session_id=session_id,
+                )
+                memory_snapshot = await self.memory_provider.bounded_snapshot(
+                    portal_id=self.config.id,
+                    user_id=user_id,
+                    max_chars=1200,
+                    max_entries=12,
+                    include_global=self.config.global_memory_enabled,
+                )
+            except Exception as e:
+                logger.warning("[Portal] MemPalace unavailable; continue without memory: %s", e)
+                memories = []
+                memory_snapshot = ""
 
         # 3. Build conversation history for context
         history = [
@@ -373,6 +312,13 @@ class PortalService:
                     direct_reply_when_fallback_disabled = NO_MATCH_FALLBACK_DISABLED_MESSAGE
             else:
                 # 6. Execute workflows (group by priority, parallel within group)
+                offloader = PortalContextOffloader(
+                    provider=self.memory_provider,
+                    portal_id=self.config.id,
+                    user_id=user_id,
+                )
+                exec_context = ExecutionContext(offloader=offloader)
+
                 plans_by_priority: Dict[int, List[WorkflowDispatchPlan]] = {}
                 for plan in intent_result.dispatch_plans:
                     plans_by_priority.setdefault(plan.priority, []).append(plan)
@@ -391,7 +337,7 @@ class PortalService:
                         )
 
                     tasks = [
-                        self._run_workflow(plan.workflow_id, plan.sub_query)
+                        self._run_workflow(plan.workflow_id, plan.sub_query, context=exec_context)
                         for plan in group
                     ]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -600,147 +546,43 @@ class PortalService:
         session_id: Optional[str] = None,
     ) -> List[PortalMemoryEntry]:
         """Retrieve memories for a user."""
-        retrieval_decision = self._resolve_memory_retrieval_strategy(
-            user_id=user_id,
-            session_id=session_id,
-        )
-        return await self._memory.retrieve(
-            portal_id=self.config.id,
-            user_id=user_id,
-            query=query,
-            top_k=top_k,
-            include_global=self.config.global_memory_enabled,
-            min_confidence=min_confidence,
-            confidence_tier=confidence_tier,
-            include_conflicted=include_conflicted,
-            session_id=session_id,
-            retrieval_strategy=retrieval_decision["strategy"],
-            strategy_decision=retrieval_decision,
-            request_source="memory_api",
-        )
+        try:
+            return await self.memory_provider.retrieve(
+                portal_id=self.config.id,
+                user_id=user_id,
+                query=query,
+                top_k=top_k,
+                include_global=self.config.global_memory_enabled,
+                session_id=session_id,
+            )
+        except Exception as e:
+            logger.warning("[Portal] get_memories failed; returning empty: %s", e)
+            return []
 
-    async def get_memory_observability_dashboard(
-        self,
-        user_id: Optional[str] = None,
-        session_id: Optional[str] = None,
-        hours: int = 24,
-        limit: int = 200,
-    ) -> Dict[str, Any]:
-        """Get memory retrieval observability metrics and traces."""
-        return await self._memory.get_retrieval_observability_dashboard(
-            portal_id=self.config.id,
-            user_id=user_id,
-            session_id=session_id,
-            hours=hours,
-            limit=limit,
-        )
-
-    async def get_pending_conflict_memories(
-        self,
-        user_id: str = "default",
-        top_k: int = 50,
-    ) -> List[PortalMemoryEntry]:
-        """List conflict memories waiting for manual confirmation."""
-        return await self._memory.list_pending_conflicts(
-            portal_id=self.config.id,
-            user_id=user_id,
-            include_global=self.config.global_memory_enabled,
-            top_k=top_k,
-        )
-
-    async def get_archived_memories(
-        self,
-        user_id: str = "default",
-        query: str = "",
-        top_k: int = 20,
-    ) -> List[PortalMemoryEntry]:
-        """List archived (cold) memories for a user."""
-        return await self._memory.list_archived(
-            portal_id=self.config.id,
-            user_id=user_id,
-            query=query,
-            top_k=top_k,
-            include_global=self.config.global_memory_enabled,
-        )
-
-    async def restore_archived_memory(
-        self,
-        entry_id: str,
-        user_id: str = "default",
-    ) -> Dict[str, Any]:
-        """Restore an archived memory back to active memory pool."""
-        return await self._memory.restore_archived(
-            portal_id=self.config.id,
-            user_id=user_id,
-            entry_id=entry_id,
-            include_global=self.config.global_memory_enabled,
-        )
-
-    async def confirm_memory_conflict(
-        self,
-        entry_id: str,
-        user_id: str = "default",
-        note: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Confirm one conflict memory as trusted."""
-        return await self._memory.confirm_conflict(
-            portal_id=self.config.id,
-            user_id=user_id,
-            entry_id=entry_id,
-            note=note,
-            include_global=self.config.global_memory_enabled,
-        )
-
-    async def resolve_memory_conflict(
-        self,
-        entry_id: str,
-        user_id: str = "default",
-        note: Optional[str] = None,
-        clear_links: bool = True,
-    ) -> Dict[str, Any]:
-        """Resolve one conflict memory and optionally clear relation links."""
-        return await self._memory.resolve_conflict(
-            portal_id=self.config.id,
-            user_id=user_id,
-            entry_id=entry_id,
-            note=note,
-            clear_links=clear_links,
-            include_global=self.config.global_memory_enabled,
-        )
-
-    async def delete_memory(self, entry_id: str) -> bool:
+    async def delete_memory(self, user_id: str, entry_id: str) -> bool:
         """Delete a specific memory entry."""
-        return await self._memory.delete(entry_id)
+        try:
+            await self.memory_provider.delete(
+                portal_id=self.config.id,
+                user_id=user_id,
+                entry_id=entry_id
+            )
+            return True
+        except Exception as e:
+            logger.warning("[Portal] delete_memory failed: %s", e)
+            return False
 
     async def clear_memories(self, user_id: str = "default") -> int:
         """Clear all memories for a user."""
-        return await self._memory.clear(self.config.id, user_id)
-
-    async def merge_near_duplicate_memories(
-        self,
-        user_id: str = "default",
-        similarity_threshold: float = 0.82,
-    ) -> Dict[str, Any]:
-        """Batch merge near-duplicate memories with reversible source lineage."""
-        return await self._memory.merge_near_duplicates(
-            portal_id=self.config.id,
-            user_id=user_id,
-            similarity_threshold=similarity_threshold,
-        )
-
-    async def unmerge_memory(
-        self,
-        entry_id: str,
-        user_id: str = "default",
-        source_entry_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Reverse one/all merged children from a canonical memory."""
-        return await self._memory.unmerge(
-            portal_id=self.config.id,
-            user_id=user_id,
-            entry_id=entry_id,
-            source_entry_id=source_entry_id,
-        )
+        try:
+            await self.memory_provider.clear(
+                portal_id=self.config.id,
+                user_id=user_id
+            )
+            return 0
+        except Exception as e:
+            logger.warning("[Portal] clear_memories failed: %s", e)
+            return 0
 
     def pre_generation_safety_scan(
         self,
@@ -889,10 +731,19 @@ class PortalService:
 
         return result
 
-    async def _run_workflow(self, workflow_id: str, sub_query: str) -> str:
+    async def _run_workflow(
+        self,
+        workflow_id: str,
+        sub_query: str,
+        context: Optional[ExecutionContext] = None,
+    ) -> str:
         """Execute a single workflow and return its text output."""
         try:
-            result = await self._wf_manager.run_workflow(workflow_id, sub_query)
+            result = await self._wf_manager.run_workflow(
+                workflow_id,
+                sub_query,
+                context=context,
+            )
             if result.error:
                 return f"[错误: {result.error}]"
             if result.response and result.response.messages:
@@ -1197,33 +1048,14 @@ Please synthesise the above into a helpful, integrated response."""
     ) -> None:
         """Background task: extract memories from the latest conversation turn."""
         try:
-            turn_text = f"User: {user_message}\nAssistant: {assistant_response}"
-            new_memories = await self._memory.extract_and_store(
+            await self.memory_provider.write_turn(
                 portal_id=self.config.id,
                 user_id=user_id,
-                conversation_turn=turn_text,
                 session_id=session.session_id,
-                llm_client=client,
-                model=self.config.model,
-                include_global=self.config.global_memory_enabled,
+                user_message=user_message,
+                assistant_response=assistant_response,
             )
-
-            # Prune if over limit
-            if self.config.memory_enabled:
-                await self._memory.prune(
-                    portal_id=self.config.id,
-                    user_id=user_id,
-                    max_entries=self.config.max_memory_entries,
-                    importance_threshold=self.config.memory_importance_threshold,
-                )
-                if self.config.global_memory_enabled:
-                    await self._memory.prune_global(
-                        user_id=user_id,
-                        max_entries=self.config.global_max_memory_entries,
-                        importance_threshold=self.config.memory_importance_threshold,
-                    )
-
-            logger.debug(f"[Portal] Extracted {len(new_memories)} memories")
+            logger.debug("[Portal] Extracted memories via MemPalace.")
         except Exception as e:
             logger.error(f"[Portal] Memory extraction error: {e}")
 
@@ -1361,13 +1193,13 @@ class PortalManager:
         base_url: Optional[str] = None,
         memory_enabled: bool = True,
         global_memory_enabled: bool = False,
-        memory_ttl_hot_hours: int = 24 * 30,
-        memory_ttl_warm_hours: int = 24 * 14,
-        memory_ttl_cold_hours: int = 24 * 3,
-        memory_ttl_hot_importance: float = 0.8,
-        memory_ttl_warm_importance: float = 0.5,
-        retrieval_strategy_default: str = DEFAULT_RETRIEVAL_STRATEGY,
-        retrieval_strategy_grayscale: Optional[Dict[str, Any]] = None,
+        memory_provider: str = "mempalace",
+        mempalace_palace_path: Optional[str] = None,
+        mempalace_command: str = "mempalace",
+        mempalace_args: Optional[List[str]] = None,
+        mempalace_env: Optional[Dict[str, str]] = None,
+        mempalace_wing_strategy: str = "per_user",
+        mempalace_default_room: str = "general",
         is_default: bool = False,
         auto_include_published: bool = False,
         fallback_to_copilot: bool = True,
@@ -1384,18 +1216,14 @@ class PortalManager:
             api_key=api_key,
             base_url=base_url,
             memory_enabled=memory_enabled,
-            memory_ttl_hot_hours=memory_ttl_hot_hours,
-            memory_ttl_warm_hours=memory_ttl_warm_hours,
-            memory_ttl_cold_hours=memory_ttl_cold_hours,
-            memory_ttl_hot_importance=memory_ttl_hot_importance,
-            memory_ttl_warm_importance=memory_ttl_warm_importance,
             global_memory_enabled=global_memory_enabled,
-            retrieval_strategy_default=PortalService._normalize_strategy_name(
-                retrieval_strategy_default
-            ),
-            retrieval_strategy_grayscale=PortalService._normalize_grayscale_config(
-                retrieval_strategy_grayscale
-            ),
+            memory_provider=str(memory_provider or "local").strip().lower(),
+            mempalace_palace_path=mempalace_palace_path,
+            mempalace_command=mempalace_command,
+            mempalace_args=mempalace_args or ["-m", "mempalace.mcp_server"],
+            mempalace_env=mempalace_env or {},
+            mempalace_wing_strategy=str(mempalace_wing_strategy or "per_user").strip().lower(),
+            mempalace_default_room=mempalace_default_room or "general",
             api_key_access=f"portal_{secrets.token_urlsafe(24)}",
             is_default=is_default,
             auto_include_published=auto_include_published,
@@ -1421,13 +1249,13 @@ class PortalManager:
         base_url: Optional[str] = None,
         memory_enabled: bool = True,
         global_memory_enabled: bool = False,
-        memory_ttl_hot_hours: int = 24 * 30,
-        memory_ttl_warm_hours: int = 24 * 14,
-        memory_ttl_cold_hours: int = 24 * 3,
-        memory_ttl_hot_importance: float = 0.8,
-        memory_ttl_warm_importance: float = 0.5,
-        retrieval_strategy_default: str = DEFAULT_RETRIEVAL_STRATEGY,
-        retrieval_strategy_grayscale: Optional[Dict[str, Any]] = None,
+        memory_provider: str = "mempalace",
+        mempalace_palace_path: Optional[str] = None,
+        mempalace_command: str = "mempalace",
+        mempalace_args: Optional[List[str]] = None,
+        mempalace_env: Optional[Dict[str, str]] = None,
+        mempalace_wing_strategy: str = "per_user",
+        mempalace_default_room: str = "general",
         is_default: bool = False,
         auto_include_published: bool = False,
         fallback_to_copilot: bool = True,
@@ -1446,13 +1274,13 @@ class PortalManager:
                 base_url=base_url,
                 memory_enabled=memory_enabled,
                 global_memory_enabled=global_memory_enabled,
-                memory_ttl_hot_hours=memory_ttl_hot_hours,
-                memory_ttl_warm_hours=memory_ttl_warm_hours,
-                memory_ttl_cold_hours=memory_ttl_cold_hours,
-                memory_ttl_hot_importance=memory_ttl_hot_importance,
-                memory_ttl_warm_importance=memory_ttl_warm_importance,
-                retrieval_strategy_default=retrieval_strategy_default,
-                retrieval_strategy_grayscale=retrieval_strategy_grayscale,
+                memory_provider=memory_provider,
+                mempalace_palace_path=mempalace_palace_path,
+                mempalace_command=mempalace_command,
+                mempalace_args=mempalace_args,
+                mempalace_env=mempalace_env,
+                mempalace_wing_strategy=mempalace_wing_strategy,
+                mempalace_default_room=mempalace_default_room,
                 is_default=is_default,
                 auto_include_published=auto_include_published,
                 fallback_to_copilot=fallback_to_copilot,
@@ -1481,21 +1309,16 @@ class PortalManager:
             allowed = {
                 "name", "description", "workflow_ids",
                 "provider", "model", "api_key", "base_url",
-                "memory_enabled", "max_memory_entries", "memory_importance_threshold",
-                "memory_ttl_hot_hours", "memory_ttl_warm_hours", "memory_ttl_cold_hours",
-                "memory_ttl_hot_importance", "memory_ttl_warm_importance",
-                "global_memory_enabled", "global_max_memory_entries",
-                "retrieval_strategy_default", "retrieval_strategy_grayscale",
+                "memory_enabled", "global_memory_enabled",
+                "memory_provider", "mempalace_palace_path", "mempalace_command",
+                "mempalace_args", "mempalace_env", "mempalace_wing_strategy",
+                "mempalace_default_room",
                 "max_session_messages", "session_ttl_hours", "public",
                 "is_default", "auto_include_published", "fallback_to_copilot",
                 "backbone_system_prompt",
             }
             for k, v in updates.items():
                 if k in allowed:
-                    if k == "retrieval_strategy_default":
-                        v = PortalService._normalize_strategy_name(v)
-                    elif k == "retrieval_strategy_grayscale":
-                        v = PortalService._normalize_grayscale_config(v)
                     setattr(config, k, v)
 
             if config.is_default:

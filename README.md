@@ -4,13 +4,13 @@
 
 ## 特性
 
-- **树形 Agent 架构**: 支持主 Agent 下挂多层子 Agent
-- **多平台集成**: 支持 Native、Coze、Dify、豆包、AutoGen 等多种 Agent
-- **插件系统**: 支持 MCP、Skill、RAG 等插件挂载
-- **智能路由**: 支持顺序、并行、条件、交接等多种路由策略
-- **深层嵌套保护**: 循环检测、深度限制、上下文压缩
+- **树形 Agent 架构**: 支持主 Agent 下挂多层子 Agent，复杂任务分解与意图路由（Intent Routing）
+- **多平台集成**: 支持 Native、Builtin、Coze、Dify、豆包、AutoGen 等多种 Agent 来源
+- **沙箱隔离执行**: 支持基于 Docker 的 Python 代码执行沙箱，杜绝危险工具逃逸
+- **插件与技能系统**: 支持 MCP、Skill（可由 LLM 自动生成与学习沉淀）、RAG 等插件挂载
+- **深层嵌套保护**: 并发状态隔离（Context Isolation）、循环检测、深度限制、上下文快照压缩
 - **REST API**: 完整的 API 支持，方便集成
-- **可视化编排**: Web UI 支持 Agent 关系编排（开发中）
+- **可视化编排与超级入口**: Web UI 支持 Agent 关系编排，并提供 Portal 统一超级入口体验
 
 ## 快速开始
 
@@ -136,59 +136,64 @@ curl -X POST http://localhost:8000/api/workflows/{workflow_id}/run \
 
 | 策略 | 说明 | 适用场景 |
 |------|------|---------|
-| Sequential | 顺序执行子 Agent | 流水线处理 |
-| Parallel | 并行执行所有子 Agent | 独立任务 |
-| Conditional | 根据条件路由 | 分类任务 |
-| Handoff | 专家交接 | 多专家协作 |
-| Hierarchical | 任务分解 | 复杂任务 |
+| Sequential | 顺序执行子 Agent，结果传递 | 流水线处理 |
+| Parallel | 并行执行子 Agent，上下文状态隔离防竞态 | 独立子任务/批量搜集 |
+| Conditional | 根据条件匹配路由 | 分类任务 |
+| Handoff | 转移控制权/专家交接 | 多专家协作转移 |
+| Coordinator | 汇总多 Agent 结果后再综合 | 综合汇报 |
+| Intent | **LLM 意图识别 + 子查询重写 + 并发优先级路由** | 复杂任务动态分发（Super Portal 核心） |
 
 ## 项目结构
 
 ```
 proton/
 ├── src/
-│   ├── core/           # 核心模块
-│   │   ├── models.py   # 数据模型
+│   ├── core/           # 核心抽象
+│   │   ├── models.py       # Pydantic 模型
 │   │   ├── agent_node.py   # Agent 节点
-│   │   ├── context.py  # 执行上下文
-│   │   └── tree_executor.py  # 树形执行器
+│   │   ├── context.py      # 上下文管理与并发隔离
+│   │   └── tree_executor.py# 树形执行器（编排内核）
 │   │
-│   ├── adapters/       # Agent 适配器
-│   │   ├── native.py   # 原生 Agent
-│   │   ├── coze.py     # Coze 适配器
-│   │   ├── dify.py     # Dify 适配器
-│   │   ├── doubao.py   # 豆包适配器
-│   │   └── autogen.py  # AutoGen 适配器
+│   ├── execution/      # 执行平面与沙箱
+│   │   ├── backends/       # Docker / Local 执行后端
+│   │   └── tool_executor.py# 统一工具执行器
+│   │
+│   ├── adapters/       # Agent 适配器层
+│   │   ├── native.py       # 原生 Agent
+│   │   ├── builtin.py      # 内置 OpenAI-compatible 工具链 Agent
+│   │   ├── coze.py / dify.py / doubao.py  # 第三方平台
+│   │   └── autogen.py / workflow.py       # AutoGen / 子工作流
 │   │
 │   ├── plugins/        # 插件系统
-│   │   ├── mcp_plugin.py   # MCP 插件
-│   │   ├── skill_plugin.py # Skill 插件
-│   │   └── rag_plugin.py   # RAG 插件
+│   │   ├── mcp_plugin.py   # MCP 协议支持
+│   │   ├── skill_plugin.py # Python 函数技能
+│   │   └── rag_plugin.py   # 向量检索
 │   │
-│   ├── orchestration/  # 编排引擎
-│   │   ├── router.py   # 路由器
-│   │   ├── aggregator.py   # 聚合器
-│   │   └── workflow.py # 工作流管理
+│   ├── portal/         # Super Portal (超级入口)
+│   │   ├── intent.py       # LLM 意图理解与分发
+│   │   ├── memory.py       # 多层记忆体系 (Hot/Warm/Cold + 冲突合并)
+│   │   └── trajectory.py   # 轨迹收集与触发学习
 │   │
-│   └── api/            # REST API
-│       └── main.py     # FastAPI 应用
-│
-├── examples/           # 示例代码
-├── config/             # 配置文件
-├── tests/              # 测试
-└── docs/               # 文档
+│   ├── artifacts/      # 生成物与学习闭环
+│   │   └── service.py      # 沉淀程序化技能 (LLM Write Code)
+│   │
+│   ├── governance/     # 治理与策略平面
+│   │   ├── policy_engine.py# 安全策略与访问控制
+│   │   └── approval.py     # Human-in-the-loop 审批机制
+│   │
+│   └── api/            # FastAPI 接口
+│       └── main.py
 ```
 
-## 开发计划
+## 演进方向 (Code Plan)
 
-- [x] 核心框架实现
-- [x] 多平台适配器
-- [x] 插件系统
-- [x] REST API
-- [ ] Web UI 编排界面
-- [ ] 持久化存储
-- [ ] 监控和可观测性
-- [ ] 更多适配器支持
+Proton 正在向“长期运行的 Agent 平台 (Always-on)”演进，近期核心里程碑已达成：
+- [x] **执行平面分层**：废弃 `exec()`，落地 Docker 隔离后端。
+- [x] **上下文并发安全**：通过深度拷贝实现了 Parallel / Intent 并发状态隔离。
+- [x] **自我改进学习**：打通了从 Trajectory 总结到 LLM 生成真实 Skill 代码并落盘的闭环。
+- [x] **记忆与上下文治理**：引入 TTL 记忆层、冲突检测与稳定快照注入。
+- [ ] **执行审批链路 (UI 联动)**：强化 PolicyEngine 与前端 ExecutionPanel 的强制审批闭环。
+- [ ] **回放与评测 (Replay & Benchmark)**：落地离线回归测试。
 
 ## 运行期产物说明
 

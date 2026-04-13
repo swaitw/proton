@@ -953,6 +953,10 @@ export const api = {
     base_url?: string;
     memory_enabled?: boolean;
     global_memory_enabled?: boolean;
+    memory_provider?: string;
+    mempalace_palace_path?: string;
+    mempalace_wing_strategy?: string;
+    mempalace_default_room?: string;
   }): Promise<any> {
     const response = await client.post('/api/portals', data);
     return response.data;

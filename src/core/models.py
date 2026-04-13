@@ -784,29 +784,15 @@ class SuperPortalConfig(BaseModel):
 
     # Memory settings
     memory_enabled: bool = True
-    max_memory_entries: int = 100         # Per user
-    memory_importance_threshold: float = 0.3   # Entries below this are pruned first
-    memory_ttl_hot_hours: int = 24 * 30   # High-value memory
-    memory_ttl_warm_hours: int = 24 * 14  # Medium-value memory
-    memory_ttl_cold_hours: int = 24 * 3   # Low-value memory
-    memory_ttl_hot_importance: float = 0.8
-    memory_ttl_warm_importance: float = 0.5
     global_memory_enabled: bool = False   # Cross-portal shared memory for the same user
-    global_max_memory_entries: int = 300  # Per user in global layer
-    retrieval_strategy_default: str = "balanced"  # balanced | lexical_first | semantic_first
-    retrieval_strategy_grayscale: Dict[str, Any] = Field(
-        default_factory=lambda: {
-            "enabled": False,
-            "version": 1,
-            "session_rules": [],
-            "user_rules": [],
-            "portal_rule": {
-                "traffic_ratio": 0.0,
-                "strategy": "semantic_first",
-                "salt": "v1",
-            },
-        }
-    )
+
+    memory_provider: str = "mempalace"  # mempalace
+    mempalace_palace_path: Optional[str] = None
+    mempalace_command: str = "python"
+    mempalace_args: List[str] = Field(default_factory=lambda: ["-m", "mempalace.mcp_server"])
+    mempalace_env: Dict[str, str] = Field(default_factory=dict)
+    mempalace_wing_strategy: str = "per_user"  # per_user | per_portal
+    mempalace_default_room: str = "general"
 
     # Session settings
     max_session_messages: int = 50        # Keep last N messages per session

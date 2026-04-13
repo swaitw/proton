@@ -557,6 +557,7 @@ class WorkflowManager:
         self,
         workflow_id: str,
         input_message: str,
+        context: Optional[ExecutionContext] = None,
     ) -> WorkflowResult:
         """Execute a workflow."""
         workflow = self._workflows.get(workflow_id)
@@ -568,12 +569,13 @@ class WorkflowManager:
                 error="Workflow not found",
             )
 
-        return await workflow.run(input_message)
+        return await workflow.run(input_message, context)
 
     async def run_workflow_stream(
         self,
         workflow_id: str,
         input_message: str,
+        context: Optional[ExecutionContext] = None,
     ) -> AsyncIterator[AgentResponseUpdate]:
         """Execute a workflow with streaming."""
         workflow = self._workflows.get(workflow_id)
@@ -584,13 +586,14 @@ class WorkflowManager:
             )
             return
 
-        async for update in workflow.run_stream(input_message):
+        async for update in workflow.run_stream(input_message, context):
             yield update
 
     async def run_workflow_stream_events(
         self,
         workflow_id: str,
         input_message: str,
+        context: Optional[ExecutionContext] = None,
     ) -> AsyncIterator[ExecutionEvent]:
         """Execute a workflow yielding detailed execution events."""
         import time
@@ -606,7 +609,7 @@ class WorkflowManager:
             )
             return
 
-        async for event in workflow.run_stream_with_events(input_message):
+        async for event in workflow.run_stream_with_events(input_message, context):
             yield event
 
     # ============== Publishing Methods ==============

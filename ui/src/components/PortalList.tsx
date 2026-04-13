@@ -18,6 +18,10 @@ export interface Portal {
   base_url?: string;
   memory_enabled: boolean;
   global_memory_enabled?: boolean;
+  memory_provider?: string;
+  mempalace_palace_path?: string;
+  mempalace_wing_strategy?: string;
+  mempalace_default_room?: string;
   api_key_access?: string;
   public: boolean;
   created_at: string;
@@ -70,6 +74,10 @@ interface FormState {
   base_url: string;
   memory_enabled: boolean;
   global_memory_enabled: boolean;
+  memory_provider: string;
+  mempalace_palace_path: string;
+  mempalace_wing_strategy: string;
+  mempalace_default_room: string;
 }
 
 const defaultForm = (): FormState => ({
@@ -82,6 +90,10 @@ const defaultForm = (): FormState => ({
   base_url: '',
   memory_enabled: true,
   global_memory_enabled: false,
+  memory_provider: 'mempalace',
+  mempalace_palace_path: 'proton_global_memory',
+  mempalace_wing_strategy: 'per_user',
+  mempalace_default_room: 'general',
 });
 
 interface PortalModalProps {
@@ -105,6 +117,10 @@ const PortalModal: React.FC<PortalModalProps> = ({ portal, workflows, onClose, o
           base_url: portal.base_url ?? '',
           memory_enabled: portal.memory_enabled,
           global_memory_enabled: portal.global_memory_enabled ?? false,
+          memory_provider: portal.memory_provider ?? 'mempalace',
+          mempalace_palace_path: portal.mempalace_palace_path ?? 'proton_global_memory',
+          mempalace_wing_strategy: portal.mempalace_wing_strategy ?? 'per_user',
+          mempalace_default_room: portal.mempalace_default_room ?? 'general',
         }
       : defaultForm()
   );
@@ -306,6 +322,60 @@ const PortalModal: React.FC<PortalModalProps> = ({ portal, workflows, onClose, o
           </div>
         </div>
 
+        {form.memory_enabled && (
+          <>
+            <div className={styles.sectionDivider}>长期记忆提供商配置</div>
+            
+            <div className={styles.formGroup}>
+              <label className={styles.label}>提供商</label>
+              <select
+                className={styles.select}
+                value={form.memory_provider}
+                onChange={e => set('memory_provider', e.target.value)}
+              >
+                <option value="mempalace">MemPalace（MCP生态空间记忆架构）</option>
+              </select>
+            </div>
+
+            {form.memory_provider === 'mempalace' && (
+              <>
+                <div className={styles.formGroup}>
+                  <label className={styles.label}>记忆宫殿路径 (Palace Path)</label>
+                  <input
+                    className={styles.input}
+                    placeholder="如：proton_global_memory"
+                    value={form.mempalace_palace_path}
+                    onChange={e => set('mempalace_palace_path', e.target.value)}
+                  />
+                </div>
+                <div className={styles.row2}>
+                  <div className={styles.formGroup}>
+                    <label className={styles.label}>Wing 分区策略</label>
+                    <select
+                      className={styles.select}
+                      value={form.mempalace_wing_strategy}
+                      onChange={e => set('mempalace_wing_strategy', e.target.value)}
+                    >
+                      <option value="per_user">按 User ID 隔离 (推荐)</option>
+                      <option value="per_portal">按 Portal ID 隔离</option>
+                      <option value="shared">全局共享 (shared_wing)</option>
+                    </select>
+                  </div>
+                  <div className={styles.formGroup}>
+                    <label className={styles.label}>默认 Room</label>
+                    <input
+                      className={styles.input}
+                      placeholder="如：general"
+                      value={form.mempalace_default_room}
+                      onChange={e => set('mempalace_default_room', e.target.value)}
+                    />
+                  </div>
+                </div>
+              </>
+            )}
+          </>
+        )}
+
         {/* Footer */}
         <div className={styles.modalFooter}>
           <button className={`${styles.btn} ${styles.btnSecondary}`} onClick={onClose}>
@@ -431,6 +501,10 @@ const PortalList: React.FC<PortalListProps> = ({ onOpenChat }) => {
       base_url: form.base_url || undefined,
       memory_enabled: form.memory_enabled,
       global_memory_enabled: form.global_memory_enabled,
+      memory_provider: form.memory_provider,
+      mempalace_palace_path: form.mempalace_palace_path || undefined,
+      mempalace_wing_strategy: form.mempalace_wing_strategy || undefined,
+      mempalace_default_room: form.mempalace_default_room || undefined,
     };
 
     if (id) {

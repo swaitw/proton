@@ -2645,13 +2645,13 @@ def create_app() -> FastAPI:
         base_url: Optional[str] = None
         memory_enabled: bool = True
         global_memory_enabled: bool = False
-        memory_ttl_hot_hours: int = 24 * 30
-        memory_ttl_warm_hours: int = 24 * 14
-        memory_ttl_cold_hours: int = 24 * 3
-        memory_ttl_hot_importance: float = 0.8
-        memory_ttl_warm_importance: float = 0.5
-        retrieval_strategy_default: str = "balanced"
-        retrieval_strategy_grayscale: Dict[str, Any] = Field(default_factory=dict)
+        memory_provider: str = "mempalace"
+        mempalace_palace_path: Optional[str] = None
+        mempalace_command: str = "python"
+        mempalace_args: List[str] = Field(default_factory=lambda: ["-m", "mempalace.mcp_server"])
+        mempalace_env: Dict[str, str] = Field(default_factory=dict)
+        mempalace_wing_strategy: str = "per_user"
+        mempalace_default_room: str = "general"
         is_default: bool = False
         auto_include_published: bool = False
         fallback_to_copilot: bool = True
@@ -2674,55 +2674,6 @@ def create_app() -> FastAPI:
         workflow_results: Dict[str, str] = Field(default_factory=dict)
         memory_snapshot: str = ""
         user_id: str = "default"
-
-    class PortalMergeMemoriesRequest(BaseModel):
-        """Batch near-duplicate merge request."""
-        user_id: str = "default"
-        similarity_threshold: float = 0.82
-
-    class PortalUnmergeMemoryRequest(BaseModel):
-        """Reverse merge request."""
-        user_id: str = "default"
-        source_entry_id: Optional[str] = None
-
-    class PortalConfirmConflictMemoryRequest(BaseModel):
-        """Confirm a pending conflict memory."""
-        user_id: str = "default"
-        note: Optional[str] = None
-
-    class PortalResolveConflictMemoryRequest(BaseModel):
-        """Resolve a conflict memory state."""
-        user_id: str = "default"
-        note: Optional[str] = None
-        clear_links: bool = True
-
-    class PortalRestoreArchivedMemoryRequest(BaseModel):
-        """Restore one archived memory entry."""
-        user_id: str = "default"
-
-    class PortalRetrievalSessionRule(BaseModel):
-        session_id: str
-        strategy: str
-        note: Optional[str] = None
-
-    class PortalRetrievalUserRule(BaseModel):
-        user_id: str
-        strategy: str
-        note: Optional[str] = None
-
-    class PortalRetrievalPortalRule(BaseModel):
-        traffic_ratio: float = 0.0
-        strategy: str = "semantic_first"
-        salt: str = "v1"
-        note: Optional[str] = None
-
-    class PortalRetrievalGrayscaleConfigRequest(BaseModel):
-        enabled: Optional[bool] = None
-        version: Optional[int] = None
-        default_strategy: Optional[str] = None
-        session_rules: Optional[List[PortalRetrievalSessionRule]] = None
-        user_rules: Optional[List[PortalRetrievalUserRule]] = None
-        portal_rule: Optional[PortalRetrievalPortalRule] = None
 
     @app.post("/api/portals", summary="创建超级入口")
     async def create_portal(request: CreatePortalRequest):
@@ -2747,13 +2698,13 @@ def create_app() -> FastAPI:
             base_url=request.base_url,
             memory_enabled=request.memory_enabled,
             global_memory_enabled=request.global_memory_enabled,
-            memory_ttl_hot_hours=request.memory_ttl_hot_hours,
-            memory_ttl_warm_hours=request.memory_ttl_warm_hours,
-            memory_ttl_cold_hours=request.memory_ttl_cold_hours,
-            memory_ttl_hot_importance=request.memory_ttl_hot_importance,
-            memory_ttl_warm_importance=request.memory_ttl_warm_importance,
-            retrieval_strategy_default=request.retrieval_strategy_default,
-            retrieval_strategy_grayscale=request.retrieval_strategy_grayscale,
+            memory_provider=request.memory_provider,
+            mempalace_palace_path=request.mempalace_palace_path,
+            mempalace_command=request.mempalace_command,
+            mempalace_args=request.mempalace_args,
+            mempalace_env=request.mempalace_env,
+            mempalace_wing_strategy=request.mempalace_wing_strategy,
+            mempalace_default_room=request.mempalace_default_room,
             is_default=request.is_default,
             auto_include_published=request.auto_include_published,
             fallback_to_copilot=request.fallback_to_copilot,
@@ -2800,11 +2751,7 @@ def create_app() -> FastAPI:
         更新超级入口配置。
 
         可更新字段：name, description, workflow_ids, provider, model,
-        api_key, base_url, memory_enabled, max_memory_entries,
-        memory_importance_threshold, memory_ttl_hot_hours, memory_ttl_warm_hours,
-        memory_ttl_cold_hours, memory_ttl_hot_importance, memory_ttl_warm_importance,
-        global_memory_enabled, global_max_memory_entries,
-        retrieval_strategy_default, retrieval_strategy_grayscale,
+        api_key, base_url, memory_enabled, global_memory_enabled,
         max_session_messages, session_ttl_hours, public
         """
         from ..portal import get_portal_manager
@@ -2992,91 +2939,6 @@ def create_app() -> FastAPI:
         )
         return [m.model_dump() for m in memories]
 
-    @app.get("/api/portals/{portal_id}/memories/observability/dashboard", summary="Memory专项观测面板指标")
-    async def get_portal_memory_observability_dashboard(
-        portal_id: str,
-        user_id: Optional[str] = None,
-        session_id: Optional[str] = None,
-        hours: int = 24,
-        limit: int = 200,
-    ):
-        """
-        获取 memory 检索观测指标与回溯明细（支持按 portal/user/session 过滤）。
-        """
-        from ..portal import get_portal_manager
-        mgr = get_portal_manager()
-        svc = await mgr.get_service(portal_id)
-        if not svc:
-            raise HTTPException(status_code=404, detail="Portal not found")
-        return await svc.get_memory_observability_dashboard(
-            user_id=user_id,
-            session_id=session_id,
-            hours=hours,
-            limit=limit,
-        )
-
-    @app.get("/api/portals/{portal_id}/memories/retrieval-strategy/grayscale", summary="获取检索策略灰度开关")
-    async def get_portal_memory_retrieval_grayscale_config(portal_id: str):
-        """查看当前 portal 的 memory 检索策略灰度配置。"""
-        from ..portal import get_portal_manager
-        mgr = get_portal_manager()
-        cfg = await mgr.get_portal(portal_id)
-        if not cfg:
-            raise HTTPException(status_code=404, detail="Portal not found")
-        return {
-            "portal_id": portal_id,
-            "default_strategy": cfg.retrieval_strategy_default,
-            "grayscale": cfg.retrieval_strategy_grayscale,
-        }
-
-    @app.put("/api/portals/{portal_id}/memories/retrieval-strategy/grayscale", summary="配置检索策略灰度开关")
-    async def update_portal_memory_retrieval_grayscale_config(
-        portal_id: str,
-        request: PortalRetrievalGrayscaleConfigRequest,
-    ):
-        """
-        配置 memory 检索策略灰度：
-        - session_rules: 精确命中 session_id
-        - user_rules: 精确命中 user_id
-        - portal_rule: 按流量比例灰度（稳定哈希）
-        """
-        from ..portal import get_portal_manager
-        from ..portal.service import PortalService
-        mgr = get_portal_manager()
-        cfg = await mgr.get_portal(portal_id)
-        if not cfg:
-            raise HTTPException(status_code=404, detail="Portal not found")
-
-        merged = PortalService._normalize_grayscale_config(cfg.retrieval_strategy_grayscale)
-        if request.enabled is not None:
-            merged["enabled"] = bool(request.enabled)
-        if request.version is not None:
-            merged["version"] = max(1, int(request.version))
-        if request.session_rules is not None:
-            merged["session_rules"] = [item.model_dump() for item in request.session_rules]
-        if request.user_rules is not None:
-            merged["user_rules"] = [item.model_dump() for item in request.user_rules]
-        if request.portal_rule is not None:
-            merged["portal_rule"] = request.portal_rule.model_dump()
-        normalized_default = cfg.retrieval_strategy_default
-        if request.default_strategy is not None:
-            normalized_default = PortalService._normalize_strategy_name(request.default_strategy)
-
-        updated = await mgr.update_portal(
-            portal_id,
-            {
-                "retrieval_strategy_default": normalized_default,
-                "retrieval_strategy_grayscale": PortalService._normalize_grayscale_config(merged),
-            },
-        )
-        if not updated:
-            raise HTTPException(status_code=404, detail="Portal not found")
-        return {
-            "portal_id": portal_id,
-            "default_strategy": updated.retrieval_strategy_default,
-            "grayscale": updated.retrieval_strategy_grayscale,
-        }
-
     @app.post("/api/portals/{portal_id}/safety/scan", summary="生成前安全扫描")
     async def portal_pre_generation_safety_scan(portal_id: str, request: PortalSafetyScanRequest):
         """对当前上下文执行生成前安全扫描，返回是否会触发拦截。"""
@@ -3099,140 +2961,16 @@ def create_app() -> FastAPI:
         )
         return result.model_dump()
 
-    @app.get("/api/portals/{portal_id}/memories/conflicts/pending", summary="查看待确认冲突记忆")
-    async def get_pending_conflict_memories(
-        portal_id: str,
-        user_id: str = "default",
-        top_k: int = 50,
-    ):
-        """返回冲突待确认池中的记忆条目。"""
-        from ..portal import get_portal_manager
-        mgr = get_portal_manager()
-        svc = await mgr.get_service(portal_id)
-        if not svc:
-            raise HTTPException(status_code=404, detail="Portal not found")
-        memories = await svc.get_pending_conflict_memories(user_id=user_id, top_k=top_k)
-        return [m.model_dump() for m in memories]
-
-    @app.get("/api/portals/{portal_id}/memories/archived", summary="查看归档记忆")
-    async def get_archived_memories(
-        portal_id: str,
-        user_id: str = "default",
-        query: str = "",
-        top_k: int = 20,
-    ):
-        """查询已归档（冷记忆）的条目，支持关键词检索。"""
-        from ..portal import get_portal_manager
-        mgr = get_portal_manager()
-        svc = await mgr.get_service(portal_id)
-        if not svc:
-            raise HTTPException(status_code=404, detail="Portal not found")
-        memories = await svc.get_archived_memories(
-            user_id=user_id,
-            query=query,
-            top_k=top_k,
-        )
-        return [m.model_dump() for m in memories]
-
-    @app.post("/api/portals/{portal_id}/memories/{entry_id}/confirm", summary="确认冲突记忆")
-    async def confirm_conflict_memory(
-        portal_id: str,
-        entry_id: str,
-        request: PortalConfirmConflictMemoryRequest,
-    ):
-        """将冲突记忆标记为已确认，并默认解决同组待确认冲突。"""
-        from ..portal import get_portal_manager
-        mgr = get_portal_manager()
-        svc = await mgr.get_service(portal_id)
-        if not svc:
-            raise HTTPException(status_code=404, detail="Portal not found")
-        return await svc.confirm_memory_conflict(
-            entry_id=entry_id,
-            user_id=request.user_id,
-            note=request.note,
-        )
-
-    @app.post("/api/portals/{portal_id}/memories/{entry_id}/resolve", summary="解决冲突记忆")
-    async def resolve_conflict_memory(
-        portal_id: str,
-        entry_id: str,
-        request: PortalResolveConflictMemoryRequest,
-    ):
-        """解决冲突记忆状态，可选清理冲突关系。"""
-        from ..portal import get_portal_manager
-        mgr = get_portal_manager()
-        svc = await mgr.get_service(portal_id)
-        if not svc:
-            raise HTTPException(status_code=404, detail="Portal not found")
-        return await svc.resolve_memory_conflict(
-            entry_id=entry_id,
-            user_id=request.user_id,
-            note=request.note,
-            clear_links=request.clear_links,
-        )
-
-    @app.post("/api/portals/{portal_id}/memories/{entry_id}/restore", summary="恢复归档记忆")
-    async def restore_archived_memory(
-        portal_id: str,
-        entry_id: str,
-        request: PortalRestoreArchivedMemoryRequest,
-    ):
-        """将归档记忆恢复到活跃记忆池。"""
-        from ..portal import get_portal_manager
-        mgr = get_portal_manager()
-        svc = await mgr.get_service(portal_id)
-        if not svc:
-            raise HTTPException(status_code=404, detail="Portal not found")
-        return await svc.restore_archived_memory(
-            entry_id=entry_id,
-            user_id=request.user_id,
-        )
-
     @app.delete("/api/portals/{portal_id}/memories/{entry_id}", summary="删除单条记忆")
-    async def delete_portal_memory(portal_id: str, entry_id: str):
+    async def delete_portal_memory(portal_id: str, entry_id: str, user_id: str = "default"):
         """删除指定的记忆条目。"""
         from ..portal import get_portal_manager
         mgr = get_portal_manager()
         svc = await mgr.get_service(portal_id)
         if not svc:
             raise HTTPException(status_code=404, detail="Portal not found")
-        ok = await svc.delete_memory(entry_id)
+        ok = await svc.delete_memory(user_id=user_id, entry_id=entry_id)
         return {"deleted": ok, "entry_id": entry_id}
-
-    @app.post("/api/portals/{portal_id}/memories/merge-near-duplicates", summary="近重复记忆合并（可逆）")
-    async def merge_near_duplicate_memories(portal_id: str, request: PortalMergeMemoriesRequest):
-        """
-        将近重复记忆合并到 canonical 条目，并保留 source_index 以支持回滚。
-        """
-        from ..portal import get_portal_manager
-        mgr = get_portal_manager()
-        svc = await mgr.get_service(portal_id)
-        if not svc:
-            raise HTTPException(status_code=404, detail="Portal not found")
-        result = await svc.merge_near_duplicate_memories(
-            user_id=request.user_id,
-            similarity_threshold=request.similarity_threshold,
-        )
-        return result
-
-    @app.post("/api/portals/{portal_id}/memories/{entry_id}/unmerge", summary="回滚记忆合并")
-    async def unmerge_portal_memory(portal_id: str, entry_id: str, request: PortalUnmergeMemoryRequest):
-        """
-        回滚近重复合并：
-        - source_entry_id 为空时，回滚该 canonical 的全部 merged 来源；
-        - 指定 source_entry_id 时，仅回滚一条来源。
-        """
-        from ..portal import get_portal_manager
-        mgr = get_portal_manager()
-        svc = await mgr.get_service(portal_id)
-        if not svc:
-            raise HTTPException(status_code=404, detail="Portal not found")
-        result = await svc.unmerge_memory(
-            entry_id=entry_id,
-            user_id=request.user_id,
-            source_entry_id=request.source_entry_id,
-        )
-        return result
 
     @app.delete("/api/portals/{portal_id}/memories", summary="清空用户所有记忆")
     async def clear_portal_memories(portal_id: str, user_id: str = "default"):

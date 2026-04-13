@@ -96,10 +96,17 @@ class ToolExecutor:
         self,
         node: AgentNode,
         slices: Optional[List[ToolExecutionSlice]] = None,
+        providers: Optional[List[Any]] = None,
     ):
         self.node = node
         self._tools: Dict[str, ExecutableTool] = {}
         self._slices = slices or []
+        
+        # Collect all tools from providers
+        if providers:
+            for provider in providers:
+                for tool in provider.get_tools():
+                    self.register_tool(tool)
 
     def register_tool(self, tool: ExecutableTool) -> None:
         """Register a unified tool."""

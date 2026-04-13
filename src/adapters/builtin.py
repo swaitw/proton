@@ -27,6 +27,7 @@ from ..core.models import (
 from ..core.context import ExecutionContext
 from ..core.agent_node import AgentNode
 from ..execution import ExecutableTool, ToolExecutor
+from ..execution.tool_provider import BuiltinToolProvider, PluginToolProvider, SystemToolProvider
 from ..governance import ToolGovernanceSlice
 from ..plugins.registry import Tool as PluginTool, get_plugin_registry
 from ..tools.base import SystemTool
@@ -211,145 +212,35 @@ class BuiltinAgentAdapter(AgentAdapter):
 
     def _rebuild_tool_executor(self) -> None:
         """Build the unified tool executor for this adapter."""
+        
+        providers = []
+        
+        if self._definition and self._definition.builtin_tools:
+            providers.append(
+                BuiltinToolProvider(
+                    tool_defs=self._definition.builtin_tools,
+                    executor_callback=self._execute_tool,
+                )
+            )
+            
+        if self._enabled_system_tools:
+            providers.append(
+                SystemToolProvider(
+                    enabled_tool_names=self._enabled_system_tools,
+                    registry=self._system_tool_registry,
+                    agent_def=self._definition,
+                    agent_node=self.node,
+                )
+            )
+            
+        if self._plugin_tools:
+            providers.append(PluginToolProvider(self._plugin_tools))
+            
         self._tool_executor = ToolExecutor(
             node=self.node,
             slices=[ToolGovernanceSlice()],
+            providers=providers,
         )
-
-        if self._definition and self._definition.builtin_tools:
-            for tool_def in self._definition.builtin_tools:
-                self._tool_executor.register_tool(
-                    ExecutableTool(
-                        name=tool_def.name,
-                        description=tool_def.description,
-                        parameters_schema=self._build_builtin_parameters_schema(tool_def),
-                        handler=self._create_builtin_tool_handler(tool_def),
-                        source="builtin",
-                        approval_required=tool_def.approval_required,
-                        metadata={"tool_type": tool_def.tool_type},
-                    )
-                )
-
-        for tool_name in self._enabled_system_tools:
-            system_tool = self._system_tool_registry.get(tool_name)
-            if system_tool is None:
-                logger.warning("Enabled system tool not found: %s", tool_name)
-                continue
-
-            self._tool_executor.register_tool(
-                ExecutableTool(
-                    name=system_tool.name,
-                    description=system_tool.description,
-                    parameters_schema=self._build_system_tool_parameters_schema(
-                        system_tool
-                    ),
-                    handler=self._create_system_tool_handler(system_tool),
-                    source="system",
-                    approval_required=system_tool.requires_approval,
-                    is_dangerous=system_tool.is_dangerous,
-                    metadata={"category": system_tool.category},
-                )
-            )
-
-        for plugin_tool in self._plugin_tools:
-            self._tool_executor.register_tool(
-                ExecutableTool(
-                    name=plugin_tool.name,
-                    description=plugin_tool.description,
-                    parameters_schema=self._normalize_parameters_schema(
-                        plugin_tool.parameters_schema
-                    ),
-                    handler=self._create_plugin_tool_handler(plugin_tool),
-                    source=plugin_tool.source or "plugin",
-                    approval_required=(
-                        plugin_tool.approval_required
-                        or bool(plugin_tool.metadata.get("approval_required"))
-                    ),
-                    is_dangerous=(
-                        plugin_tool.is_dangerous
-                        or bool(plugin_tool.metadata.get("is_dangerous"))
-                    ),
-                    metadata=plugin_tool.metadata.copy(),
-                )
-            )
-
-    def _create_builtin_tool_handler(self, tool_def: BuiltinToolDefinition):
-        async def handler(params: Dict[str, Any], _: ExecutionContext) -> str:
-            return await self._execute_tool(tool_def, params)
-
-        return handler
-
-    def _create_system_tool_handler(self, system_tool: SystemTool):
-        async def handler(params: Dict[str, Any], context: ExecutionContext) -> str:
-            return await system_tool.execute(
-                **params,
-                __agent_definition=self._definition,
-                __agent_node=self.node,
-                __execution_context=context,
-            )
-
-        return handler
-
-    def _create_plugin_tool_handler(self, plugin_tool: PluginTool):
-        async def handler(params: Dict[str, Any], _: ExecutionContext) -> Any:
-            return await plugin_tool.execute(**params)
-
-        return handler
-
-    def _build_builtin_parameters_schema(
-        self,
-        tool_def: BuiltinToolDefinition,
-    ) -> Dict[str, Any]:
-        properties = {}
-        required = []
-
-        for param in tool_def.parameters:
-            param_schema: Dict[str, Any] = {
-                "type": (
-                    param.type.value if hasattr(param.type, "value") else str(param.type)
-                ),
-                "description": param.description,
-            }
-            if param.enum:
-                param_schema["enum"] = param.enum
-            if param.default is not None:
-                param_schema["default"] = param.default
-
-            properties[param.name] = param_schema
-            if param.required:
-                required.append(param.name)
-
-        return {
-            "type": "object",
-            "properties": properties,
-            "required": required,
-        }
-
-    def _build_system_tool_parameters_schema(
-        self,
-        system_tool: SystemTool,
-    ) -> Dict[str, Any]:
-        return self._normalize_parameters_schema(
-            system_tool.to_openai_schema()["function"]["parameters"]
-        )
-
-    def _normalize_parameters_schema(
-        self,
-        schema: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        if not schema:
-            return {"type": "object", "properties": {}}
-        if schema.get("type") == "object":
-            normalized = dict(schema)
-            normalized.setdefault("properties", {})
-            normalized.setdefault("required", [])
-            return normalized
-        return {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": True,
-        }
 
     async def run(
         self,

@@ -1,0 +1,60 @@
+wing: proton
+rooms:
+- name: frontend
+  description: Files from ui/
+  keywords:
+  - frontend
+  - ui
+- name: configuration
+  description: Files from config/
+  keywords:
+  - configuration
+  - config
+- name: testing
+  description: Files from tests/
+  keywords:
+  - testing
+  - tests
+- name: output
+  description: Files from output/
+  keywords:
+  - output
+  - output
+- name: documentation
+  description: Files from docs/
+  keywords:
+  - documentation
+  - docs
+- name: examples
+  description: Files from examples/
+  keywords:
+  - examples
+  - examples
+- name: scripts
+  description: Files from scripts/
+  keywords:
+  - scripts
+  - scripts
+- name: data
+  description: Files from data/
+  keywords:
+  - data
+  - data
+- name: design_system
+  description: Files from design-system/
+  keywords:
+  - design_system
+  - design-system
+- name: src
+  description: Files from src/
+  keywords:
+  - src
+  - src
+- name: backend
+  description: Files from api/
+  keywords:
+  - backend
+  - api
+- name: general
+  description: Files that don't fit other rooms
+  keywords: []

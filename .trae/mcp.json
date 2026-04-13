@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "mempalace": {
+      "args": [
+        "-m",
+        "mempalace.mcp_server"
+      ],
+      "command": "python3",
+      "env": {},
+      "type": "stdio"
+    }
+  }
+}

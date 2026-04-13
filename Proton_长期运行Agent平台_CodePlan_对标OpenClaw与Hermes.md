@@ -15,14 +15,17 @@
 - 超级入口雏形：`src/portal/*`（意图路由 + 记忆 + workflow 调度 + synthesis）
 - UI：`ui/`（ReactFlow 编排 + ExecutionPanel SSE）
 - 存储抽象：`src/storage/persistence.py`（sqlite/file/postgres）
+- **[新] 治理与沙箱层：`src/execution/backends/*` 提供了 Docker 隔离沙箱与 Local 降级机制，废弃了原有的同进程 `exec()` 风险执行。**
+- **[新] 上下文并发隔离：在 `tree_executor.py` 和 `context.py` 中实现了 `create_child_context(isolate=True)` 与 `merge_isolated_context()`，彻底解决了 Parallel 与 Intent 路由中的状态竞态污染。**
+- **[新] 技能程序化学习：`ArtifactFactoryService` 已经打通了通过 LLM 直接生成真实 Python Skill 脚本的流程，实现了“对话 → 总结 → 自动写代码落盘”的学习闭环。**
 
 **关键缺口（按“长期运行平台”要求）**
 
-1. **治理平面缺失**：`requires_approval/is_dangerous` 未形成后端强制门禁；`code tool` 仍 `exec()`；缺统一 policy/审计/trace。
-2. **执行平面不分层**：工具执行基本在同进程/同机；缺可替换 backend（local/docker/ssh/serverless）与资源隔离。
+1. ~~治理平面缺失：`requires_approval/is_dangerous` 未形成后端强制门禁；`code tool` 仍 `exec()`；缺统一 policy/审计/trace。~~ (**已部分修复：沙箱已落地，但统一审批拦截门禁（Gate）和审计日志（AuditLog）仍需进一步完善 UI 联动。**)
+2. ~~执行平面不分层：工具执行基本在同进程/同机；缺可替换 backend（local/docker/ssh/serverless）与资源隔离。~~ (**已修复：已实现 Backend 抽象并落地 DockerBackend。**)
 3. **控制平面尚未产品化**：session/identity/channel/workspace/toolset/skill/job 等未统一建模，迁移/导出/审计薄弱。
-4. **评测与轨迹闭环缺失**：无 trajectory、replay、benchmark、回归门禁。
-5. **工具面割裂**：PluginRegistry（MCP/Skill/RAG）与 BuiltinAgentAdapter 的 tool calling 两套体系。
+4. **评测与轨迹闭环缺失**：无 trajectory_replay、benchmark、回归门禁。（*注：目前 TrajectoryPool 已实现，但主要用于触发学习，尚未用于离线回放评测*）
+5. **工具面割裂**：PluginRegistry（MCP/Skill/RAG）与 BuiltinAgentAdapter 的 tool calling 两套体系尚未完全统一。
 6. **上下文工程偏弱**：压缩/缓存/引用/谱系缺系统化（影响成本与稳定性）。
 
 ---

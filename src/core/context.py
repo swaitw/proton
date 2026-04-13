@@ -10,14 +10,20 @@ Handles:
 
 import time
 import asyncio
+import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Protocol
 from contextlib import asynccontextmanager
 import logging
 
 from .models import ChatMessage, AgentResponse, ErrorHandlingStrategy
 
 logger = logging.getLogger(__name__)
+
+class ContextOffloader(Protocol):
+    """Protocol for offloading context messages to cold storage."""
+    async def offload(self, messages: List[ChatMessage], wing: str, room: str) -> Optional[Dict[str, Any]]:
+        ...
 
 
 @dataclass
@@ -115,6 +121,7 @@ class ExecutionContext:
     messages: List[ChatMessage] = field(default_factory=list)
     compressed_context: Optional[str] = None
     max_context_tokens: int = 32000
+    offloader: Optional[ContextOffloader] = None
 
     # Timeout management
     total_timeout: float = 300.0  # 5 minutes default
@@ -256,6 +263,12 @@ class ExecutionContext:
         # Summarize middle messages
         middle = self.messages[1:-6]
         if middle:
+            wing = str(self.shared_state.get("mempalace_wing") or f"proton_exec_{str(self.execution_id)[:8]}")
+            room = str(self.shared_state.get("mempalace_room") or "context_offload")
+            
+            if self.offloader:
+                self._schedule_offload(middle, wing=wing, room=room)
+                
             summary = self._summarize_messages(middle)
             self.compressed_context = summary
             self.messages = keep_first + keep_last
@@ -263,30 +276,108 @@ class ExecutionContext:
                 f"Context compressed: {len(middle)} messages summarized"
             )
 
+    def _schedule_offload(
+        self,
+        messages: List[ChatMessage],
+        *,
+        wing: str,
+        room: str,
+    ) -> None:
+        if not self.offloader:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        count = len(messages)
+
+        async def _do_offload() -> Optional[Dict[str, Any]]:
+            return await self.offloader.offload(messages, wing, room)
+
+        task = loop.create_task(_do_offload())
+        
+        # Keep a strong reference to the task
+        if not hasattr(self, "_background_tasks"):
+            self._background_tasks = set()
+        self._background_tasks.add(task)
+
+        def _done(t: "asyncio.Task[Any]") -> None:
+            self._background_tasks.discard(t)
+            try:
+                result = t.result()
+                if isinstance(result, dict) and result.get("drawer_id"):
+                    archives = self.shared_state.get("mempalace_archives")
+                    if not isinstance(archives, list):
+                        archives = []
+                    archives.append(result)
+                    self.shared_state["mempalace_archives"] = archives
+                    self.warnings.append(
+                        f"Context offloaded: drawer_id={result.get('drawer_id')} wing={result.get('wing')} room={result.get('room')} count={result.get('count')}"
+                    )
+            except Exception as e:
+                self.warnings.append(f"Context offload failed: {e}")
+
+        task.add_done_callback(_done)
+
     def _summarize_messages(self, messages: List[ChatMessage]) -> str:
         """Create a summary of messages for context compression."""
-        # Simple summary - in production, use an LLM to summarize
-        summary_parts = []
-        for msg in messages:
-            role = msg.role.value
-            content = msg.content[:100] + "..." if len(msg.content) > 100 else msg.content
-            summary_parts.append(f"[{role}]: {content}")
+        joined = "\n".join(f"[{m.role.value}] {m.content}" for m in messages)
+        try:
+            from mempalace.dialect import Dialect
 
-        return "\n".join(summary_parts)
+            dialect = Dialect()
+            return dialect.compress(joined)
+        except Exception:
+            summary_parts = []
+            for msg in messages:
+                role = msg.role.value
+                content = msg.content[:100] + "..." if len(msg.content) > 100 else msg.content
+                summary_parts.append(f"[{role}]: {content}")
+
+            return "\n".join(summary_parts)
 
     def get_context_for_agent(self) -> List[ChatMessage]:
         """
         Get the message context for an agent, including any compressed context.
         """
+        from .models import MessageRole
+
+        prefix: List[ChatMessage] = []
+        archives = self.shared_state.get("mempalace_archives")
+        if isinstance(archives, list) and archives:
+            lines: List[str] = []
+            for item in archives[-5:]:
+                if not isinstance(item, dict):
+                    continue
+                drawer_id = item.get("drawer_id")
+                if not drawer_id:
+                    continue
+                wing = item.get("wing") or ""
+                room = item.get("room") or ""
+                count = item.get("count")
+                if count is not None:
+                    lines.append(f"- drawer_id={drawer_id} wing={wing} room={room} count={count}")
+                else:
+                    lines.append(f"- drawer_id={drawer_id} wing={wing} room={room}")
+            if lines:
+                prefix.append(
+                    ChatMessage(
+                        role=MessageRole.SYSTEM,
+                        content="[Archived conversation blocks]:\n" + "\n".join(lines),
+                    )
+                )
+
         if self.compressed_context:
-            # Insert compressed context as a system message
-            from .models import MessageRole
-            compressed_msg = ChatMessage(
-                role=MessageRole.SYSTEM,
-                content=f"[Previous conversation summary]:\n{self.compressed_context}"
+            prefix.append(
+                ChatMessage(
+                    role=MessageRole.SYSTEM,
+                    content=f"[Previous conversation summary]:\n{self.compressed_context}",
+                )
             )
-            return [compressed_msg] + self.messages
-        return self.messages
+
+        return prefix + self.messages
 
     def record_error(
         self,
