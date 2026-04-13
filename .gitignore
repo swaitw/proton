@@ -54,3 +54,7 @@ data/skills/*
 
 # Local checkout: MemPalace (do not commit)
 mempalace/
+
+# Local checkouts: Reference implementations (do not commit)
+hermes-agent/
+openclaw/
