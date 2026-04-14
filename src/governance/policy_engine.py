@@ -55,13 +55,11 @@ class ToolPolicyEngine:
             )
 
         tool_name = request.tool.name
-        deny_tools = set(self._to_str_list(policy.get("deny_tools")))
-        allow_tools = set(self._to_str_list(policy.get("allow_tools")))
-        require_approval_tools = set(
-            self._to_str_list(policy.get("require_approval_tools"))
-        )
+        deny_tools = self._to_str_list(policy.get("deny_tools"))
+        allow_tools = self._to_str_list(policy.get("allow_tools"))
+        require_approval_tools = self._to_str_list(policy.get("require_approval_tools"))
 
-        if tool_name in deny_tools:
+        if self._matches_any(tool_name, deny_tools):
             return PolicyDecision(
                 action=PolicyAction.DENY,
                 reason="tool_denied_by_policy",
@@ -72,7 +70,7 @@ class ToolPolicyEngine:
                 },
             )
 
-        if tool_name in allow_tools:
+        if self._matches_any(tool_name, allow_tools):
             return PolicyDecision(
                 action=PolicyAction.ALLOW,
                 reason="tool_allowed_by_policy",
@@ -136,7 +134,7 @@ class ToolPolicyEngine:
                 },
             )
 
-        if tool_name in require_approval_tools:
+        if self._matches_any(tool_name, require_approval_tools):
             return PolicyDecision(
                 action=PolicyAction.REQUIRE_APPROVAL,
                 reason="tool_requires_approval_by_policy",

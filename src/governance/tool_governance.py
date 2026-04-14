@@ -4,6 +4,7 @@ Tool governance slice for approval enforcement and audit trails.
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 from typing import Any, Dict, Iterable, Optional
 
@@ -130,14 +131,16 @@ class ToolGovernanceSlice(ToolExecutionSlice):
 
         for source in approval_sources:
             approved_tools = self._as_iterable(source.get(self.approved_tools_key))
-            if tool_name in approved_tools:
-                request.runtime_metadata["approval_resolution"] = {
-                    "approval_status": "approved",
-                    "approval_source": "runtime_tool",
-                    "tool_name": request.tool.name,
-                    "tool_source": request.tool.source,
-                }
-                return True
+            for pattern in approved_tools:
+                if fnmatch.fnmatch(tool_name, pattern):
+                    request.runtime_metadata["approval_resolution"] = {
+                        "approval_status": "approved",
+                        "approval_source": "runtime_tool",
+                        "tool_name": request.tool.name,
+                        "tool_source": request.tool.source,
+                        "matched_pattern": pattern,
+                    }
+                    return True
 
             approved_tool_calls = self._as_iterable(
                 source.get(self.approved_tool_calls_key)

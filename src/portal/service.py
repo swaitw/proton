@@ -22,6 +22,7 @@ from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 from uuid import uuid4
 
+from ..execution.backends.local import LocalProcessBackend
 from ..core.context import ContextOffloader, ExecutionContext
 from ..core.models import (
     ChatMessage,
@@ -146,6 +147,10 @@ class PortalService:
             default_room=getattr(config, "mempalace_default_room", "general"),
         )
         self._safety_scanner = PreGenerationSafetyScanner()
+        self._local_backend = LocalProcessBackend(
+            workspace_dir=getattr(config, "workspace_dir", None),
+            namespace=config.id
+        )
         self._client = None   # lazy-initialised OpenAI client
         self._intent_svc: Optional[IntentUnderstandingService] = None
 
@@ -317,7 +322,7 @@ class PortalService:
                     portal_id=self.config.id,
                     user_id=user_id,
                 )
-                exec_context = ExecutionContext(offloader=offloader)
+                exec_context = ExecutionContext(offloader=offloader, backend=self._local_backend)
 
                 plans_by_priority: Dict[int, List[WorkflowDispatchPlan]] = {}
                 for plan in intent_result.dispatch_plans:
@@ -1204,6 +1209,7 @@ class PortalManager:
         auto_include_published: bool = False,
         fallback_to_copilot: bool = True,
         backbone_system_prompt: str = DEFAULT_BACKBONE_SYSTEM_PROMPT,
+        workspace_dir: Optional[str] = None,
     ) -> SuperPortalConfig:
         """Create and persist a new Super Portal configuration. Caller must hold _portal_lock."""
         config = SuperPortalConfig(
@@ -1229,6 +1235,7 @@ class PortalManager:
             auto_include_published=auto_include_published,
             fallback_to_copilot=fallback_to_copilot,
             backbone_system_prompt=backbone_system_prompt,
+            workspace_dir=workspace_dir,
         )
 
         self._portals[config.id] = config
@@ -1260,6 +1267,7 @@ class PortalManager:
         auto_include_published: bool = False,
         fallback_to_copilot: bool = True,
         backbone_system_prompt: str = DEFAULT_BACKBONE_SYSTEM_PROMPT,
+        workspace_dir: Optional[str] = None,
     ) -> SuperPortalConfig:
         """Create and persist a new Super Portal configuration."""
         await self._ensure_ready()
@@ -1285,6 +1293,7 @@ class PortalManager:
                 auto_include_published=auto_include_published,
                 fallback_to_copilot=fallback_to_copilot,
                 backbone_system_prompt=backbone_system_prompt,
+                workspace_dir=workspace_dir,
             )
 
     async def get_portal(self, portal_id: str) -> Optional[SuperPortalConfig]:
@@ -1316,6 +1325,7 @@ class PortalManager:
                 "max_session_messages", "session_ttl_hours", "public",
                 "is_default", "auto_include_published", "fallback_to_copilot",
                 "backbone_system_prompt",
+                "workspace_dir",
             }
             for k, v in updates.items():
                 if k in allowed:

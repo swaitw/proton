@@ -804,6 +804,9 @@ class SuperPortalConfig(BaseModel):
     fallback_to_copilot: bool = True      # Fallback to Copilot guidance when no workflow
     backbone_system_prompt: str = "You are a helpful AI assistant. Answer the user's question directly, clearly, and concisely. Use Markdown formatting where appropriate."
 
+    # Execution Backend settings
+    workspace_dir: Optional[str] = None   # Base directory for local execution sandboxing
+
     # Access control
     api_key_access: Optional[str] = None  # Portal-level API key
     public: bool = False                  # Allow access without api_key

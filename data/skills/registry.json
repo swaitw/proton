@@ -5893,6 +5893,1374 @@
       "installed_at": "2026-04-13 20:22:37.739671",
       "enabled": true,
       "agent_ids": []
+    },
+    {
+      "id": "d30c52c1-2452-494f-9a14-eed543ef10a5",
+      "metadata": {
+        "name": "\u628a\u65e5\u62a5\u7ed3\u6784\u5316\u5e76\u8f93\u51fa\u56fa\u5b9a\u683c\u5f0f_skill",
+        "description": "\u628a\u65e5\u62a5\u7ed3\u6784\u5316\u5e76\u8f93\u51fa\u56fa\u5b9a\u683c\u5f0f",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/d30c52c1-2452-494f-9a14-eed543ef10a5",
+      "installed_at": "2026-04-13 21:47:59.619968",
+      "enabled": true,
+      "agent_ids": [
+        "agent-a"
+      ]
+    },
+    {
+      "id": "3a0ce9a7-c1fc-4bb4-9cc2-e4ee53aec3b0",
+      "metadata": {
+        "name": "\u7ed3\u6784\u5316\u5ba2\u670d\u95ee\u7b54_skill",
+        "description": "\u7ed3\u6784\u5316\u5ba2\u670d\u95ee\u7b54",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/3a0ce9a7-c1fc-4bb4-9cc2-e4ee53aec3b0",
+      "installed_at": "2026-04-13 21:48:16.714442",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "ddea1a24-c3cd-44d4-a5d4-ae7a2bbf1489",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u7f16\u6392_skill",
+        "description": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u7f16\u6392",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/ddea1a24-c3cd-44d4-a5d4-ae7a2bbf1489",
+      "installed_at": "2026-04-13 21:48:33.358662",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "5bee8a00-2293-43ea-a479-02744af25c73",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u53d1\u5e03\u6d41\u6c34\u7ebf_skill",
+        "description": "\u81ea\u52a8\u5316\u53d1\u5e03\u6d41\u6c34\u7ebf",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/5bee8a00-2293-43ea-a479-02744af25c73",
+      "installed_at": "2026-04-13 21:48:50.226397",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "4a62f565-4b7d-48b7-8eb7-c61910872722",
+      "metadata": {
+        "name": "\u77e5\u8bc6\u5e93\u95ee\u7b54_skill",
+        "description": "\u77e5\u8bc6\u5e93\u95ee\u7b54",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/4a62f565-4b7d-48b7-8eb7-c61910872722",
+      "installed_at": "2026-04-13 21:49:06.856143",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "3d6a76bc-e730-41e4-9d9e-64334ca536c7",
+      "metadata": {
+        "name": "\u77e5\u8bc6\u5e93\u95ee\u7b54_v2_skill",
+        "description": "\u77e5\u8bc6\u5e93\u95ee\u7b54-v2",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/3d6a76bc-e730-41e4-9d9e-64334ca536c7",
+      "installed_at": "2026-04-13 21:49:23.256439",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "6c968134-e8b7-4f3b-a323-24a4582a06e6",
+      "metadata": {
+        "name": "\u98ce\u63a7\u5ba1\u6279\u81ea\u52a8\u5316_skill",
+        "description": "\u98ce\u63a7\u5ba1\u6279\u81ea\u52a8\u5316",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/6c968134-e8b7-4f3b-a323-24a4582a06e6",
+      "installed_at": "2026-04-13 21:49:39.872187",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "75847c75-995d-4617-8dec-08b2d5984752",
+      "metadata": {
+        "name": "\u81ea\u52a8\u8d28\u68c0\u6d41\u6c34\u7ebf_skill",
+        "description": "\u81ea\u52a8\u8d28\u68c0\u6d41\u6c34\u7ebf",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/75847c75-995d-4617-8dec-08b2d5984752",
+      "installed_at": "2026-04-13 21:49:56.423175",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "61bfc07e-fba7-4495-a35b-6e046b72d955",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf_skill",
+        "description": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/61bfc07e-fba7-4495-a35b-6e046b72d955",
+      "installed_at": "2026-04-13 21:50:13.336151",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "0953217d-089f-436b-beae-2de6e69cc223",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf_\u81ea\u52a8\u4fee\u8ba2_skill",
+        "description": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf\uff08\u81ea\u52a8\u4fee\u8ba2\uff09",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/0953217d-089f-436b-beae-2de6e69cc223",
+      "installed_at": "2026-04-13 21:50:29.745521",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "79d03968-69fb-4fb2-85f6-5483df13ecbf",
+      "metadata": {
+        "name": "\u628a\u65e5\u62a5\u7ed3\u6784\u5316\u5e76\u8f93\u51fa\u56fa\u5b9a\u683c\u5f0f_skill",
+        "description": "\u628a\u65e5\u62a5\u7ed3\u6784\u5316\u5e76\u8f93\u51fa\u56fa\u5b9a\u683c\u5f0f",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/79d03968-69fb-4fb2-85f6-5483df13ecbf",
+      "installed_at": "2026-04-13 22:12:27.407095",
+      "enabled": true,
+      "agent_ids": [
+        "agent-a"
+      ]
+    },
+    {
+      "id": "e7471eb2-61bf-43a6-ab64-923903d4df0d",
+      "metadata": {
+        "name": "\u7ed3\u6784\u5316\u5ba2\u670d\u95ee\u7b54_skill",
+        "description": "\u7ed3\u6784\u5316\u5ba2\u670d\u95ee\u7b54",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/e7471eb2-61bf-43a6-ab64-923903d4df0d",
+      "installed_at": "2026-04-13 22:12:44.395028",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "cd9bce3a-d651-41c8-8752-1b091ffae1d8",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u7f16\u6392_skill",
+        "description": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u7f16\u6392",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/cd9bce3a-d651-41c8-8752-1b091ffae1d8",
+      "installed_at": "2026-04-13 22:13:00.983054",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "d21ad96c-73be-43b4-a0d7-99585a39acc5",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u53d1\u5e03\u6d41\u6c34\u7ebf_skill",
+        "description": "\u81ea\u52a8\u5316\u53d1\u5e03\u6d41\u6c34\u7ebf",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/d21ad96c-73be-43b4-a0d7-99585a39acc5",
+      "installed_at": "2026-04-13 22:13:17.941101",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "2de79e5b-bb83-47b7-b126-69b425c9ed97",
+      "metadata": {
+        "name": "\u77e5\u8bc6\u5e93\u95ee\u7b54_skill",
+        "description": "\u77e5\u8bc6\u5e93\u95ee\u7b54",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/2de79e5b-bb83-47b7-b126-69b425c9ed97",
+      "installed_at": "2026-04-13 22:13:34.462467",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "bc7f2d17-1807-4912-8c2b-48ca630359c3",
+      "metadata": {
+        "name": "\u77e5\u8bc6\u5e93\u95ee\u7b54_v2_skill",
+        "description": "\u77e5\u8bc6\u5e93\u95ee\u7b54-v2",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/bc7f2d17-1807-4912-8c2b-48ca630359c3",
+      "installed_at": "2026-04-13 22:13:50.813954",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "c957fa59-ce79-419b-b98d-d619407c493d",
+      "metadata": {
+        "name": "\u98ce\u63a7\u5ba1\u6279\u81ea\u52a8\u5316_skill",
+        "description": "\u98ce\u63a7\u5ba1\u6279\u81ea\u52a8\u5316",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/c957fa59-ce79-419b-b98d-d619407c493d",
+      "installed_at": "2026-04-13 22:14:07.363912",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "34602158-bd26-4ef4-ac9b-940596fa2b54",
+      "metadata": {
+        "name": "\u81ea\u52a8\u8d28\u68c0\u6d41\u6c34\u7ebf_skill",
+        "description": "\u81ea\u52a8\u8d28\u68c0\u6d41\u6c34\u7ebf",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/34602158-bd26-4ef4-ac9b-940596fa2b54",
+      "installed_at": "2026-04-13 22:14:23.977503",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "af9cb5f9-a10d-4e5c-93f3-f5b2413b4683",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf_skill",
+        "description": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/af9cb5f9-a10d-4e5c-93f3-f5b2413b4683",
+      "installed_at": "2026-04-13 22:14:40.860735",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "36a722d8-f016-4a66-918b-ee18fbc5504d",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf_\u81ea\u52a8\u4fee\u8ba2_skill",
+        "description": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf\uff08\u81ea\u52a8\u4fee\u8ba2\uff09",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/36a722d8-f016-4a66-918b-ee18fbc5504d",
+      "installed_at": "2026-04-13 22:14:57.414179",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "6c25ebe7-86bf-4f88-8b9c-e8b0d899f316",
+      "metadata": {
+        "name": "\u628a\u65e5\u62a5\u7ed3\u6784\u5316\u5e76\u8f93\u51fa\u56fa\u5b9a\u683c\u5f0f_skill",
+        "description": "\u628a\u65e5\u62a5\u7ed3\u6784\u5316\u5e76\u8f93\u51fa\u56fa\u5b9a\u683c\u5f0f",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/6c25ebe7-86bf-4f88-8b9c-e8b0d899f316",
+      "installed_at": "2026-04-13 22:18:07.932562",
+      "enabled": true,
+      "agent_ids": [
+        "agent-a"
+      ]
+    },
+    {
+      "id": "50bb3d7c-512a-4de6-af95-3c8feaacb415",
+      "metadata": {
+        "name": "\u7ed3\u6784\u5316\u5ba2\u670d\u95ee\u7b54_skill",
+        "description": "\u7ed3\u6784\u5316\u5ba2\u670d\u95ee\u7b54",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/50bb3d7c-512a-4de6-af95-3c8feaacb415",
+      "installed_at": "2026-04-13 22:18:24.927611",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "ebf9446f-f539-4db8-bb42-80d63a369b66",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u7f16\u6392_skill",
+        "description": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u7f16\u6392",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/ebf9446f-f539-4db8-bb42-80d63a369b66",
+      "installed_at": "2026-04-13 22:18:41.551270",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "f5a0827b-0196-4d25-81bf-b17b4b763a89",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u53d1\u5e03\u6d41\u6c34\u7ebf_skill",
+        "description": "\u81ea\u52a8\u5316\u53d1\u5e03\u6d41\u6c34\u7ebf",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/f5a0827b-0196-4d25-81bf-b17b4b763a89",
+      "installed_at": "2026-04-13 22:18:58.488481",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "e9ea7dd7-d9f2-4243-b019-67da9e23f6a4",
+      "metadata": {
+        "name": "\u77e5\u8bc6\u5e93\u95ee\u7b54_skill",
+        "description": "\u77e5\u8bc6\u5e93\u95ee\u7b54",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/e9ea7dd7-d9f2-4243-b019-67da9e23f6a4",
+      "installed_at": "2026-04-13 22:19:15.156244",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "6947bd5c-b7eb-4435-a592-6571677db105",
+      "metadata": {
+        "name": "\u77e5\u8bc6\u5e93\u95ee\u7b54_v2_skill",
+        "description": "\u77e5\u8bc6\u5e93\u95ee\u7b54-v2",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/6947bd5c-b7eb-4435-a592-6571677db105",
+      "installed_at": "2026-04-13 22:19:31.571525",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "21e1d16f-455a-4018-b28c-d5e9cebb6cdd",
+      "metadata": {
+        "name": "\u98ce\u63a7\u5ba1\u6279\u81ea\u52a8\u5316_skill",
+        "description": "\u98ce\u63a7\u5ba1\u6279\u81ea\u52a8\u5316",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/21e1d16f-455a-4018-b28c-d5e9cebb6cdd",
+      "installed_at": "2026-04-13 22:19:47.995602",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "d43aabee-b86b-4731-a2a5-01c7ae7b6cfe",
+      "metadata": {
+        "name": "\u81ea\u52a8\u8d28\u68c0\u6d41\u6c34\u7ebf_skill",
+        "description": "\u81ea\u52a8\u8d28\u68c0\u6d41\u6c34\u7ebf",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/d43aabee-b86b-4731-a2a5-01c7ae7b6cfe",
+      "installed_at": "2026-04-13 22:20:04.693119",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "9d12a051-7bfd-491e-a80e-6397c751afda",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf_skill",
+        "description": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/9d12a051-7bfd-491e-a80e-6397c751afda",
+      "installed_at": "2026-04-13 22:20:21.464242",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "36803ca4-379b-459e-a9b0-5ac2e01e8218",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf_\u81ea\u52a8\u4fee\u8ba2_skill",
+        "description": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf\uff08\u81ea\u52a8\u4fee\u8ba2\uff09",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/36803ca4-379b-459e-a9b0-5ac2e01e8218",
+      "installed_at": "2026-04-13 22:20:38.102704",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "faf64e2a-8dae-46f7-b5c5-9c54b91f8c25",
+      "metadata": {
+        "name": "\u628a\u65e5\u62a5\u7ed3\u6784\u5316\u5e76\u8f93\u51fa\u56fa\u5b9a\u683c\u5f0f_skill",
+        "description": "\u628a\u65e5\u62a5\u7ed3\u6784\u5316\u5e76\u8f93\u51fa\u56fa\u5b9a\u683c\u5f0f",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/faf64e2a-8dae-46f7-b5c5-9c54b91f8c25",
+      "installed_at": "2026-04-13 22:30:04.550128",
+      "enabled": true,
+      "agent_ids": [
+        "agent-a"
+      ]
+    },
+    {
+      "id": "6807b592-a905-4e7a-a64e-fa774d02d5aa",
+      "metadata": {
+        "name": "\u7ed3\u6784\u5316\u5ba2\u670d\u95ee\u7b54_skill",
+        "description": "\u7ed3\u6784\u5316\u5ba2\u670d\u95ee\u7b54",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/6807b592-a905-4e7a-a64e-fa774d02d5aa",
+      "installed_at": "2026-04-13 22:30:21.516964",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "fb12bd21-3ea0-43aa-aaed-56a300f9e6a0",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u7f16\u6392_skill",
+        "description": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u7f16\u6392",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/fb12bd21-3ea0-43aa-aaed-56a300f9e6a0",
+      "installed_at": "2026-04-13 22:30:38.126149",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "9a502984-37d9-49c2-82d0-c0382885d875",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u53d1\u5e03\u6d41\u6c34\u7ebf_skill",
+        "description": "\u81ea\u52a8\u5316\u53d1\u5e03\u6d41\u6c34\u7ebf",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/9a502984-37d9-49c2-82d0-c0382885d875",
+      "installed_at": "2026-04-13 22:30:54.916623",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "4f5413a7-bc6a-4f95-bee3-56e506b9ec24",
+      "metadata": {
+        "name": "\u77e5\u8bc6\u5e93\u95ee\u7b54_skill",
+        "description": "\u77e5\u8bc6\u5e93\u95ee\u7b54",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/4f5413a7-bc6a-4f95-bee3-56e506b9ec24",
+      "installed_at": "2026-04-13 22:31:11.441003",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "357f23eb-07d6-4c95-94bf-83f4b3d7e19c",
+      "metadata": {
+        "name": "\u77e5\u8bc6\u5e93\u95ee\u7b54_v2_skill",
+        "description": "\u77e5\u8bc6\u5e93\u95ee\u7b54-v2",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/357f23eb-07d6-4c95-94bf-83f4b3d7e19c",
+      "installed_at": "2026-04-13 22:31:27.694741",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "bc63b114-e85d-4c6d-875f-ac09c444d5c4",
+      "metadata": {
+        "name": "\u98ce\u63a7\u5ba1\u6279\u81ea\u52a8\u5316_skill",
+        "description": "\u98ce\u63a7\u5ba1\u6279\u81ea\u52a8\u5316",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/bc63b114-e85d-4c6d-875f-ac09c444d5c4",
+      "installed_at": "2026-04-13 22:31:44.171807",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "44c1b125-3a49-4a03-8973-7f045cd3d504",
+      "metadata": {
+        "name": "\u81ea\u52a8\u8d28\u68c0\u6d41\u6c34\u7ebf_skill",
+        "description": "\u81ea\u52a8\u8d28\u68c0\u6d41\u6c34\u7ebf",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/44c1b125-3a49-4a03-8973-7f045cd3d504",
+      "installed_at": "2026-04-13 22:32:00.835962",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "8b8e9843-cd5b-4f8d-b513-19db4a7d15a9",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf_skill",
+        "description": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/8b8e9843-cd5b-4f8d-b513-19db4a7d15a9",
+      "installed_at": "2026-04-13 22:32:17.479343",
+      "enabled": true,
+      "agent_ids": []
+    },
+    {
+      "id": "428213e1-5584-4ec9-b7a2-a47fda5fd450",
+      "metadata": {
+        "name": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf_\u81ea\u52a8\u4fee\u8ba2_skill",
+        "description": "\u81ea\u52a8\u5316\u6d4b\u8bd5\u6d41\u6c34\u7ebf\uff08\u81ea\u52a8\u4fee\u8ba2\uff09",
+        "version": "1.0.0",
+        "author": "proton-artifact-factory",
+        "tags": [
+          "auto-generated",
+          "candidate"
+        ],
+        "entry_point": "skill.py",
+        "function_name": "execute",
+        "parameters_schema": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "\u7528\u6237\u8f93\u5165"
+            }
+          },
+          "required": [
+            "input"
+          ]
+        },
+        "approval_required": false,
+        "dependencies": [],
+        "icon": null
+      },
+      "package_path": "data/skills/428213e1-5584-4ec9-b7a2-a47fda5fd450",
+      "installed_at": "2026-04-13 22:32:33.840642",
+      "enabled": true,
+      "agent_ids": []
     }
   ]
 }

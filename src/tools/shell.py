@@ -115,6 +115,26 @@ class ShellExecTool(SystemTool):
         if not is_safe:
             return f"Error: Command rejected - {reason}"
 
+        context = kwargs.get("__execution_context")
+        backend = context.backend if context else None
+
+        if backend:
+            try:
+                result = await backend.run_command(command, cwd=working_dir, timeout=timeout)
+                result_parts = []
+                if result.exit_code != 0:
+                    result_parts.append(f"[Exit code: {result.exit_code}]")
+                if result.output:
+                    result_parts.append(f"[STDOUT]\n{result.output}")
+                if result.error:
+                    result_parts.append(f"[STDERR]\n{result.error}")
+                if not result_parts:
+                    result_parts.append("Command completed successfully (no output)")
+                return "\n\n".join(result_parts)
+            except Exception as e:
+                logger.error(f"Error executing shell command via backend: {e}")
+                return f"Error executing command: {e}"
+
         # Resolve working directory
         workspace = os.path.expanduser(DEFAULT_WORKSPACE)
         os.makedirs(workspace, exist_ok=True)
@@ -224,6 +244,17 @@ class ShellExecBackgroundTool(SystemTool):
 
         if not command:
             return "Error: command is required"
+
+        context = kwargs.get("__execution_context")
+        backend = context.backend if context else None
+
+        if backend:
+            try:
+                pid = await backend.run_command_background(command, cwd=working_dir)
+                return f"Background process started with PID: {pid}"
+            except Exception as e:
+                logger.error(f"Error starting background process via backend: {e}")
+                return f"Error starting background process: {e}"
 
         # Resolve working directory
         workspace = os.path.expanduser(DEFAULT_WORKSPACE)

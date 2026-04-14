@@ -122,6 +122,16 @@ class FileReadTool(SystemTool):
         if not filepath:
             return "Error: path is required"
 
+        context = kwargs.get("__execution_context")
+        backend = context.backend if context else None
+
+        if backend:
+            try:
+                return await backend.read_file(filepath, encoding=encoding)
+            except Exception as e:
+                logger.error(f"Error reading file via backend: {e}")
+                return f"Error reading file: {e}"
+
         try:
             path = _ensure_workspace(filepath)
             if not path.exists():
@@ -197,6 +207,17 @@ class FileWriteTool(SystemTool):
         # Strip leading slashes to prevent absolute path issues
         filepath = filepath.lstrip("/")
 
+        context = kwargs.get("__execution_context")
+        backend = context.backend if context else None
+
+        if backend:
+            try:
+                await backend.write_file(filepath, content, encoding=encoding, append=False)
+                return f"Successfully wrote {len(content)} characters to file.\nFull path: {filepath}"
+            except Exception as e:
+                logger.error(f"Error writing file via backend: {e}")
+                return f"Error writing file: {e}"
+
         try:
             path = _ensure_workspace(filepath)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,8 +226,9 @@ class FileWriteTool(SystemTool):
             logger.info(f"Writing file to: {path.resolve()}")
             logger.info(f"Content length: {len(content)} characters")
 
-            path.write_text(content, encoding=encoding)
-            return f"Successfully wrote {len(content)} characters to file.\nFull path: {path.resolve()}"
+            with open(path, "w", encoding=encoding) as f:
+                f.write(content)
+            return f"Successfully wrote {len(content)} characters to file.\nFull path: {path}"
         except PermissionError as e:
             logger.error(f"Permission error writing file {filepath}: {e}")
             return f"Error: Permission denied - {e}"
@@ -261,6 +283,17 @@ class FileAppendTool(SystemTool):
         if not filepath:
             return "Error: path is required"
 
+        context = kwargs.get("__execution_context")
+        backend = context.backend if context else None
+
+        if backend:
+            try:
+                await backend.write_file(filepath, content, append=True)
+                return f"Successfully appended {len(content)} characters to {filepath}"
+            except Exception as e:
+                logger.error(f"Error appending to file via backend: {e}")
+                return f"Error appending to file: {e}"
+
         try:
             path = _ensure_workspace(filepath)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -311,6 +344,26 @@ class FileListTool(SystemTool):
     async def execute(self, **kwargs: Any) -> str:
         dirpath = kwargs.get("path", ".")
         recursive = kwargs.get("recursive", False)
+
+        context = kwargs.get("__execution_context")
+        backend = context.backend if context else None
+
+        if backend:
+            try:
+                backend_entries = await backend.list_dir(dirpath, recursive=recursive)
+                if not backend_entries:
+                    return f"Directory {dirpath} is empty"
+                
+                result = []
+                for entry in backend_entries:
+                    entry_type = "dir" if entry.is_dir else "file"
+                    display_path = entry.path if recursive else entry.name
+                    result.append(f"[{entry_type}] {display_path} ({entry.size} bytes)")
+                
+                return "\n".join(sorted(result))
+            except Exception as e:
+                logger.error(f"Error listing directory via backend: {e}")
+                return f"Error listing directory: {e}"
 
         try:
             path = _ensure_workspace(dirpath)
@@ -382,6 +435,17 @@ class FileDeleteTool(SystemTool):
 
         if not filepath:
             return "Error: path is required"
+
+        context = kwargs.get("__execution_context")
+        backend = context.backend if context else None
+
+        if backend:
+            try:
+                await backend.delete_path(filepath)
+                return f"Successfully deleted: {filepath}"
+            except Exception as e:
+                logger.error(f"Error deleting via backend: {e}")
+                return f"Error deleting: {e}"
 
         try:
             path = _ensure_workspace(filepath)
