@@ -83,6 +83,7 @@ class SkillPackageMetadata(BaseModel):
     approval_required: bool = False
     dependencies: List[str] = Field(default_factory=list)
     icon: Optional[str] = None              # Icon URL or emoji
+    readme: Optional[str] = None            # Markdown content of SKILL.md
 
 
 class InstalledSkill(BaseModel):

@@ -170,6 +170,7 @@ class SkillParser:
             raise ValueError("SKILL.md frontmatter not properly closed with ---")
 
         yaml_content = parts[1].strip()
+        readme_content = parts[2].strip() if len(parts) > 2 else None
 
         try:
             metadata_dict = yaml.safe_load(yaml_content)
@@ -195,6 +196,7 @@ class SkillParser:
             approval_required=metadata_dict.get('approval_required', False),
             dependencies=metadata_dict.get('dependencies', []),
             icon=metadata_dict.get('icon'),
+            readme=readme_content,
         )
 
         return metadata

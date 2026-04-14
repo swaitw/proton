@@ -1078,9 +1078,14 @@ def create_app() -> FastAPI:
                 "name": skill.metadata.name,
                 "description": skill.metadata.description,
                 "version": skill.metadata.version,
+                "author": skill.metadata.author,
+                "tags": skill.metadata.tags,
                 "enabled": skill.enabled,
                 "installed_at": skill.installed_at.isoformat(),
                 "agent_count": len(skill.agent_ids),
+                "readme": skill.metadata.readme,
+                "parameters_schema": skill.metadata.parameters_schema,
+                "dependencies": skill.metadata.dependencies,
             }
             for skill in skills
         ]
@@ -1119,6 +1124,8 @@ def create_app() -> FastAPI:
                 "name": skill.metadata.name,
                 "description": skill.metadata.description,
                 "version": skill.metadata.version,
+                "author": skill.metadata.author,
+                "tags": skill.metadata.tags,
                 "enabled": skill.enabled,
                 "installed_at": skill.installed_at.isoformat(),
             }

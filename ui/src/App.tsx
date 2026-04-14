@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
-import { FiList, FiCpu, FiSettings, FiZap } from 'react-icons/fi';
+import { FiList, FiCpu, FiSettings, FiZap, FiLayers } from 'react-icons/fi';
 import WorkflowEditor from './components/WorkflowEditor';
 import WorkflowList from './components/WorkflowList';
 import SettingsPanel from './components/SettingsPanel';
 import PortalList from './components/PortalList';
 import PortalChat from './components/PortalChat';
 import RootPortalChat from './components/RootPortalChat';
+import SkillMarket from './components/SkillMarket';
 import type { Portal } from './components/PortalList';
 import { ToastProvider } from './components/ToastProvider';
 import styles from './App.module.css';
@@ -19,7 +20,7 @@ const App: React.FC = () => {
     { key: 'root_portal', label: 'AI助手',     icon: <FiZap /> },
     { key: 'workflows', label: '工作流列表',   icon: <FiList /> },
     { key: 'portals',   label: '超级入口',     icon: <FiCpu /> },
-    { key: 'plugins',   label: '插件管理',     icon: <FiSettings /> },
+    { key: 'skills',    label: '技能库',       icon: <FiLayers /> },
     { key: 'settings',  label: '系统设置',     icon: <FiSettings /> },
   ];
 
@@ -70,8 +71,8 @@ const App: React.FC = () => {
           />
         );
 
-      case 'plugins':
-        return <div className={styles.placeholder}>插件管理功能即将推出...</div>;
+      case 'skills':
+        return <SkillMarket />;
 
       case 'settings':
         return (
