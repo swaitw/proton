@@ -366,6 +366,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to initialize portal manager: {e}")
 
+    try:
+        from ..integrations import get_integrations_gateway
+        gw = get_integrations_gateway()
+        await gw.startup()
+        logger.info("Integrations gateway initialized")
+    except Exception as e:
+        logger.warning(f"Failed to initialize integrations gateway: {e}")
+
     yield
 
     # Shutdown
@@ -375,6 +383,13 @@ async def lifespan(app: FastAPI):
 
     # Close storage
     await storage.close()
+
+    try:
+        from ..integrations import get_integrations_gateway
+        gw = get_integrations_gateway()
+        await gw.shutdown()
+    except Exception:
+        pass
 
 
 def create_app() -> FastAPI:
@@ -2788,6 +2803,10 @@ def create_app() -> FastAPI:
         user_id: str = "default"
         stream: bool = True
 
+    class PortalChannelUpsertRequest(BaseModel):
+        enabled: bool = True
+        config: Dict[str, Any] = Field(default_factory=dict)
+
     class PortalSafetyScanRequest(BaseModel):
         """Manual pre-generation safety scan request."""
         user_message: str
@@ -2865,6 +2884,87 @@ def create_app() -> FastAPI:
         if not config:
             raise HTTPException(status_code=404, detail="Portal not found")
         return config.model_dump()
+
+    @app.get("/api/portals/{portal_id}/channels", summary="获取入口绑定的社交渠道状态")
+    async def list_portal_channels(portal_id: str):
+        from ..portal import get_portal_manager
+        from ..integrations import get_integrations_gateway
+        mgr = get_portal_manager()
+        config = await mgr.get_portal(portal_id)
+        if not config:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        gw = get_integrations_gateway()
+        status_map = await gw.list_status(portal_id)
+        return {k: v.model_dump() for k, v in status_map.items()}
+
+    @app.put("/api/portals/{portal_id}/channels/{channel}", summary="绑定/更新入口的社交渠道配置")
+    async def upsert_portal_channel(portal_id: str, channel: str, body: PortalChannelUpsertRequest):
+        from ..portal import get_portal_manager
+        from ..integrations import get_integrations_gateway
+        mgr = get_portal_manager()
+        config = await mgr.get_portal(portal_id)
+        if not config:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        if channel not in ("telegram", "dingtalk", "weixin", "feishu"):
+            raise HTTPException(status_code=400, detail="Unsupported channel")
+        gw = get_integrations_gateway()
+        binding = await gw.upsert_binding(
+            portal_id=portal_id,
+            channel=channel,  # type: ignore[arg-type]
+            config=body.config,
+            enabled=body.enabled,
+        )
+        return binding.model_dump()
+
+    @app.delete("/api/portals/{portal_id}/channels/{channel}", summary="解绑入口的社交渠道")
+    async def delete_portal_channel(portal_id: str, channel: str):
+        from ..portal import get_portal_manager
+        from ..integrations import get_integrations_gateway
+        mgr = get_portal_manager()
+        config = await mgr.get_portal(portal_id)
+        if not config:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        if channel not in ("telegram", "dingtalk", "weixin", "feishu"):
+            raise HTTPException(status_code=400, detail="Unsupported channel")
+        gw = get_integrations_gateway()
+        ok = await gw.delete_binding(portal_id, channel)  # type: ignore[arg-type]
+        return {"deleted": ok}
+
+    @app.post("/api/portals/{portal_id}/channels/weixin/qr/start", summary="微信扫码登录：开始")
+    async def weixin_qr_start(portal_id: str):
+        from ..portal import get_portal_manager
+        from ..integrations import get_integrations_gateway
+        mgr = get_portal_manager()
+        config = await mgr.get_portal(portal_id)
+        if not config:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        gw = get_integrations_gateway()
+        resp = await gw.weixin_qr_start()
+        return resp.model_dump()
+
+    @app.get("/api/portals/{portal_id}/channels/weixin/qr/{login_id}", summary="微信扫码登录：轮询状态")
+    async def weixin_qr_poll(portal_id: str, login_id: str):
+        from ..portal import get_portal_manager
+        from ..integrations import get_integrations_gateway
+        mgr = get_portal_manager()
+        config = await mgr.get_portal(portal_id)
+        if not config:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        gw = get_integrations_gateway()
+        resp = await gw.weixin_qr_poll(login_id)
+        if resp.status == "confirmed" and resp.credential:
+            await gw.upsert_binding(
+                portal_id=portal_id,
+                channel="weixin",
+                config={
+                    "account_id": resp.credential.get("account_id"),
+                    "token": resp.credential.get("token"),
+                    "base_url": resp.credential.get("base_url"),
+                    "user_id": resp.credential.get("user_id"),
+                },
+                enabled=True,
+            )
+        return resp.model_dump()
 
     @app.put("/api/portals/{portal_id}", summary="更新超级入口配置")
     async def update_portal(portal_id: str, updates: Dict[str, Any]):

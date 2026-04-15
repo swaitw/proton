@@ -55,7 +55,7 @@ const SkillMarket: React.FC = () => {
   const [mcpForm, setMcpForm] = useState({ name: '', command: '', args: '', env: '' });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { showToast } = useToast();
+  const toast = useToast();
 
   const fetchSkills = async () => {
     try {
@@ -113,7 +113,7 @@ const SkillMarket: React.FC = () => {
       setSkills(sortedData);
     } catch (err: any) {
       const errMsg = err?.response?.data?.detail || err?.message || String(err);
-      showToast(errMsg, 'error');
+      toast.error(errMsg);
     } finally {
       setLoading(false);
     }
@@ -134,11 +134,11 @@ const SkillMarket: React.FC = () => {
     try {
       setUploading(true);
       await api.uploadSkill(file);
-      showToast('技能安装成功！', 'success');
+      toast.success('技能安装成功！');
       fetchSkills(); // Refresh the list
     } catch (err: any) {
       const errMsg = err?.response?.data?.detail || err?.message || String(err);
-      showToast(errMsg, 'error');
+      toast.error(errMsg);
     } finally {
       setUploading(false);
       if (fileInputRef.current) {
@@ -159,21 +159,21 @@ const SkillMarket: React.FC = () => {
       } else {
         await api.uninstallSkill(skillId);
       }
-      showToast(`已卸载 ${skillName}`, 'success');
+      toast.success(`已卸载 ${skillName}`);
       setSkills(skills.filter((s) => s.id !== skillId));
       if (selectedSkill?.id === skillId) {
         setSelectedSkill(null);
       }
     } catch (err: any) {
       const errMsg = err?.response?.data?.detail || err?.message || String(err);
-      showToast(errMsg, 'error');
+      toast.error(errMsg);
     }
   };
 
   const handleMcpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!mcpForm.name || !mcpForm.command) {
-      showToast('名称和启动命令为必填项', 'error');
+      toast.error('名称和启动命令为必填项');
       return;
     }
 
@@ -202,13 +202,13 @@ const SkillMarket: React.FC = () => {
         is_global: true
       });
       
-      showToast('MCP 服务连接成功！', 'success');
+      toast.success('MCP 服务连接成功！');
       setMcpModalVisible(false);
       setMcpForm({ name: '', command: '', args: '', env: '' });
       fetchSkills();
     } catch (err: any) {
       const errMsg = err?.response?.data?.detail || err?.message || String(err);
-      showToast(errMsg, 'error');
+      toast.error(errMsg);
     } finally {
       setUploading(false);
     }

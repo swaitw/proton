@@ -1030,4 +1030,33 @@ export const api = {
     });
     return response.data;
   },
+
+  async getPortalChannels(portalId: string): Promise<Record<string, any>> {
+    const response = await client.get(`/api/portals/${portalId}/channels`);
+    return response.data;
+  },
+
+  async upsertPortalChannel(
+    portalId: string,
+    channel: string,
+    data: { enabled: boolean; config: Record<string, any> },
+  ): Promise<any> {
+    const response = await client.put(`/api/portals/${portalId}/channels/${channel}`, data);
+    return response.data;
+  },
+
+  async deletePortalChannel(portalId: string, channel: string): Promise<any> {
+    const response = await client.delete(`/api/portals/${portalId}/channels/${channel}`);
+    return response.data;
+  },
+
+  async startWeixinQrLogin(portalId: string): Promise<any> {
+    const response = await client.post(`/api/portals/${portalId}/channels/weixin/qr/start`);
+    return response.data;
+  },
+
+  async pollWeixinQrLogin(portalId: string, loginId: string): Promise<any> {
+    const response = await client.get(`/api/portals/${portalId}/channels/weixin/qr/${loginId}`);
+    return response.data;
+  },
 };
