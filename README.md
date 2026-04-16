@@ -63,6 +63,77 @@ python examples/basic_workflow.py
 python -m src.api.main
 ```
 
+### MemPalace MCP 自检
+
+如果你启用了 Portal 长期记忆（MemPalace），建议在当前 Python 环境执行一次自检：
+
+```bash
+python scripts/check_mempalace_mcp.py
+```
+
+通过标准：
+- 能 `import mempalace.mcp_server`
+- 能执行 `python -m mempalace.mcp_server --help`
+- `MemPalaceClient.ensure_ready()` 返回 ready 且发现工具列表
+
+说明：生产/分发环境请保持 `mempalace_command=python`、`mempalace_args=["-m","mempalace.mcp_server"]`，并确保 Proton 与 MemPalace 安装在同一环境中。
+
+### 飞书接入与配对
+
+以下流程用于将 `Root Portal` 连接到飞书机器人（长连接模式）。
+
+1. 飞书开放平台配置（企业自建应用）
+- 事件接收方式：`长连接（WebSocket）`
+- 订阅事件：`im.message.receive_v1`
+- 应用发布：权限和事件配置完成后，务必“发布版本”
+
+2. 飞书权限（建议最小可用集合）
+- `contact:user.base:readonly`
+- `im:chat`
+- `im:message`
+- `im:message.group_at_msg:readonly`
+- `im:message.group_msg`
+- `im:message.p2p_msg:readonly`
+
+3. 在 Proton 里绑定飞书渠道
+- 通过 Web UI 的 Portal 渠道设置填写 `app_id`、`app_secret` 并启用 `feishu`
+- 或调用接口：
+
+```bash
+curl -X PUT http://127.0.0.1:8000/api/portals/{portal_id}/channels/feishu \
+  -H "Content-Type: application/json" \
+  -d '{
+    "enabled": true,
+    "config": {
+      "app_id": "cli_xxx",
+      "app_secret": "xxx"
+    }
+  }'
+```
+
+4. 生成配对码并在飞书私聊发送
+- 配对码获取位置：
+  - 在 Web UI 的飞书渠道面板点击“生成配对码”
+  - 或调用接口，返回体里的 `pairing_code` 就是要发送给机器人的码
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/portals/{portal_id}/channels/feishu/pairing \
+  -H "Content-Type: application/json" \
+  -d '{"ttl_seconds": 1800}'
+```
+
+- 用户在飞书里给机器人发送该码，成功后会收到“已配对成功，可以开始对话”
+- 可通过接口查看当前绑定用户（`allowed_users`）：
+
+```bash
+curl http://127.0.0.1:8000/api/portals/{portal_id}/channels/feishu/allowlist
+```
+
+5. 关于重启与重新配对
+- 服务重启后通常不需要重新配对
+- 原因：成功配对后用户 `open_id` 会落到 `allowed_users` 并持久化
+- 只有删除渠道绑定、清空存储或切换到新 portal 时，才需要重新配对
+
 ### API 使用
 
 ```bash

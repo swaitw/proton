@@ -13,7 +13,7 @@ import json
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -368,6 +368,8 @@ async def lifespan(app: FastAPI):
 
     try:
         from ..integrations import get_integrations_gateway
+        from ..integrations.ssl_bootstrap import ensure_ssl_certs
+        ensure_ssl_certs()
         gw = get_integrations_gateway()
         await gw.startup()
         logger.info("Integrations gateway initialized")
@@ -2807,6 +2809,9 @@ def create_app() -> FastAPI:
         enabled: bool = True
         config: Dict[str, Any] = Field(default_factory=dict)
 
+    class PortalChannelPairingRequest(BaseModel):
+        ttl_seconds: int = 900
+
     class PortalSafetyScanRequest(BaseModel):
         """Manual pre-generation safety scan request."""
         user_message: str
@@ -2929,6 +2934,56 @@ def create_app() -> FastAPI:
         gw = get_integrations_gateway()
         ok = await gw.delete_binding(portal_id, channel)  # type: ignore[arg-type]
         return {"deleted": ok}
+
+    @app.get("/api/portals/{portal_id}/channels/{channel}/allowlist", summary="获取渠道 allowlist")
+    async def get_portal_channel_allowlist(portal_id: str, channel: str):
+        from ..portal import get_portal_manager
+        from ..integrations import get_integrations_gateway
+        mgr = get_portal_manager()
+        config = await mgr.get_portal(portal_id)
+        if not config:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        if channel not in ("telegram", "dingtalk", "weixin", "feishu"):
+            raise HTTPException(status_code=400, detail="Unsupported channel")
+        gw = get_integrations_gateway()
+        try:
+            return await gw.get_allowlist(portal_id, channel)  # type: ignore[arg-type]
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.post("/api/portals/{portal_id}/channels/{channel}/pairing", summary="生成渠道配对码")
+    async def create_portal_channel_pairing_code(portal_id: str, channel: str, body: PortalChannelPairingRequest):
+        from ..portal import get_portal_manager
+        from ..integrations import get_integrations_gateway
+        mgr = get_portal_manager()
+        config = await mgr.get_portal(portal_id)
+        if not config:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        if channel not in ("telegram", "dingtalk", "weixin", "feishu"):
+            raise HTTPException(status_code=400, detail="Unsupported channel")
+        gw = get_integrations_gateway()
+        return await gw.create_pairing_code(portal_id, channel, ttl_seconds=body.ttl_seconds)  # type: ignore[arg-type]
+
+    @app.post("/api/portals/{portal_id}/channels/feishu/webhook", summary="飞书事件回调（Webhook 模式）")
+    async def feishu_webhook(portal_id: str, request: Request):
+        from ..portal import get_portal_manager
+        from ..integrations import get_integrations_gateway
+        mgr = get_portal_manager()
+        config = await mgr.get_portal(portal_id)
+        if not config:
+            raise HTTPException(status_code=404, detail="Portal not found")
+        raw_body = await request.body()
+        try:
+            payload = json.loads(raw_body.decode("utf-8", errors="replace"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON")
+        if payload.get("type") == "url_verification":
+            return {"challenge": payload.get("challenge", "")}
+        gw = get_integrations_gateway()
+        try:
+            return await gw.handle_feishu_webhook(portal_id, payload, dict(request.headers), raw_body)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     @app.post("/api/portals/{portal_id}/channels/weixin/qr/start", summary="微信扫码登录：开始")
     async def weixin_qr_start(portal_id: str):
@@ -3071,16 +3126,26 @@ def create_app() -> FastAPI:
 
         if request.stream:
             async def generate():
-                async for event in svc.chat(
-                    session_id=request.session_id,
-                    user_message=request.message,
-                    user_id=request.user_id,
-                    stream=True,
-                ):
-                    data = event.model_dump(exclude_none=True)
-                    if "timestamp" in data:
-                        data["timestamp"] = data["timestamp"].isoformat()
-                    yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                try:
+                    async for event in svc.chat(
+                        session_id=request.session_id,
+                        user_message=request.message,
+                        user_id=request.user_id,
+                        stream=True,
+                    ):
+                        data = event.model_dump(exclude_none=True)
+                        if "timestamp" in data:
+                            data["timestamp"] = data["timestamp"].isoformat()
+                        yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    logger.exception("[PortalAPI] stream chat failed: portal_id=%s session_id=%s", portal_id, request.session_id)
+                    err_payload = {
+                        "type": "error",
+                        "session_id": request.session_id,
+                        "portal_id": portal_id,
+                        "error": str(e),
+                    }
+                    yield f"data: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
@@ -3095,18 +3160,22 @@ def create_app() -> FastAPI:
         else:
             events = []
             content_parts = []
-            async for event in svc.chat(
-                session_id=request.session_id,
-                user_message=request.message,
-                user_id=request.user_id,
-                stream=False,
-            ):
-                d = event.model_dump(exclude_none=True)
-                if "timestamp" in d:
-                    d["timestamp"] = d["timestamp"].isoformat()
-                events.append(d)
-                if event.delta:
-                    content_parts.append(event.delta)
+            try:
+                async for event in svc.chat(
+                    session_id=request.session_id,
+                    user_message=request.message,
+                    user_id=request.user_id,
+                    stream=False,
+                ):
+                    d = event.model_dump(exclude_none=True)
+                    if "timestamp" in d:
+                        d["timestamp"] = d["timestamp"].isoformat()
+                    events.append(d)
+                    if event.delta:
+                        content_parts.append(event.delta)
+            except Exception as e:
+                logger.exception("[PortalAPI] chat failed: portal_id=%s session_id=%s", portal_id, request.session_id)
+                raise HTTPException(status_code=500, detail=str(e))
             return {
                 "content": "".join(content_parts),
                 "events": events,

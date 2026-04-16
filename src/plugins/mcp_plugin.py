@@ -7,6 +7,7 @@ This plugin integrates MCP servers as tool providers for agents.
 import logging
 import asyncio
 import subprocess
+from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
@@ -31,6 +32,7 @@ class MCPPlugin(Plugin):
         self._server_process: Optional[subprocess.Popen] = None
         self._client = None
         self._mcp_available = False
+        self._exit_stack: Optional[AsyncExitStack] = None
 
     async def initialize(self) -> None:
         """Initialize the MCP plugin."""
@@ -69,23 +71,25 @@ class MCPPlugin(Plugin):
 
     async def _start_stdio_server(self) -> None:
         """Start an MCP server using stdio transport."""
+        cfg = self._mcp_config
+        if not cfg:
+            raise ValueError("MCPServerConfig is required")
         try:
             from mcp import ClientSession
             from mcp.client.stdio import stdio_client, StdioServerParameters
 
             server_params = StdioServerParameters(
-                command=self._mcp_config.command,
-                args=self._mcp_config.args,
-                env=self._mcp_config.env or None,
+                command=cfg.command,
+                args=cfg.args,
+                env=cfg.env or None,
             )
 
-            # Create the client connection
-            self._stdio_transport = await stdio_client(server_params).__aenter__()
-            read_stream, write_stream = self._stdio_transport
+            stack = AsyncExitStack()
+            read_stream, write_stream = await stack.enter_async_context(stdio_client(server_params))
 
             # Create session
-            self._client = ClientSession(read_stream, write_stream)
-            await self._client.__aenter__()
+            self._client = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            self._exit_stack = stack
 
             # Initialize
             await self._client.initialize()
@@ -94,7 +98,7 @@ class MCPPlugin(Plugin):
             tools_result = await self._client.list_tools()
             self._tools = self._convert_mcp_tools(tools_result.tools)
 
-            logger.info(f"Connected to MCP server {self._mcp_config.name} with {len(self._tools)} tools")
+            logger.info(f"Connected to MCP server {cfg.name} with {len(self._tools)} tools")
 
         except Exception as e:
             logger.error(f"Failed to start stdio MCP server: {e}")
@@ -102,20 +106,22 @@ class MCPPlugin(Plugin):
 
     async def _connect_http_server(self) -> None:
         """Connect to an MCP server using HTTP transport."""
-        if not self._mcp_config.url:
+        cfg = self._mcp_config
+        if not cfg:
+            raise ValueError("MCPServerConfig is required")
+        if not cfg.url:
             raise ValueError("URL is required for HTTP transport")
 
         try:
             from mcp import ClientSession
             from mcp.client.sse import sse_client
 
-            # Create SSE client
-            self._sse_transport = await sse_client(self._mcp_config.url).__aenter__()
-            read_stream, write_stream = self._sse_transport
+            stack = AsyncExitStack()
+            read_stream, write_stream = await stack.enter_async_context(sse_client(cfg.url))
 
             # Create session
-            self._client = ClientSession(read_stream, write_stream)
-            await self._client.__aenter__()
+            self._client = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            self._exit_stack = stack
 
             # Initialize
             await self._client.initialize()
@@ -132,6 +138,7 @@ class MCPPlugin(Plugin):
         """Convert MCP tools to our Tool format."""
         tools = []
         for mcp_tool in mcp_tools:
+            mcp_server_name = self._mcp_config.name if self._mcp_config else "unknown"
             tool = Tool(
                 name=mcp_tool.name,
                 description=mcp_tool.description or "",
@@ -139,7 +146,7 @@ class MCPPlugin(Plugin):
                 handler=self._create_tool_handler(mcp_tool.name),
                 source="mcp",
                 metadata={
-                    "mcp_server": self._mcp_config.name,
+                    "mcp_server": mcp_server_name,
                 },
             )
             tools.append(tool)
@@ -162,15 +169,10 @@ class MCPPlugin(Plugin):
     async def cleanup(self) -> None:
         """Clean up MCP resources."""
         try:
-            if self._client:
-                await self._client.__aexit__(None, None, None)
-                self._client = None
-
-            if hasattr(self, '_stdio_transport') and self._stdio_transport:
-                await self._stdio_transport.__aexit__(None, None, None)
-
-            if hasattr(self, '_sse_transport') and self._sse_transport:
-                await self._sse_transport.__aexit__(None, None, None)
+            if self._exit_stack:
+                await self._exit_stack.aclose()
+                self._exit_stack = None
+            self._client = None
 
             if self._server_process:
                 self._server_process.terminate()

@@ -679,13 +679,48 @@ class PortalService:
                 raise RuntimeError("openai package is required. Install with: pip install openai")
 
             kwargs: Dict[str, Any] = {}
-            api_key = self.config.api_key or os.environ.get("OPENAI_API_KEY")
+            provider = (self.config.provider or "openai").strip().lower()
+            api_key = self.config.api_key
+            base_url = self.config.base_url
+
+            # Fallback to copilot internal config when portal config does not carry secrets.
+            if (not api_key or not base_url) and provider != "ollama":
+                try:
+                    from ..copilot import get_copilot_service
+
+                    copilot_cfg = get_copilot_service().get_internal_config()
+                    if copilot_cfg.get("provider") == provider:
+                        api_key = api_key or copilot_cfg.get("api_key")
+                        base_url = base_url or copilot_cfg.get("base_url")
+                except Exception:
+                    pass
+
+            if not api_key and provider != "ollama":
+                provider_env_keys = {
+                    "openai": "OPENAI_API_KEY",
+                    "zhipu": "ZHIPU_API_KEY",
+                    "deepseek": "DEEPSEEK_API_KEY",
+                    "qwen": "QWEN_API_KEY",
+                    "moonshot": "MOONSHOT_API_KEY",
+                    "anthropic": "ANTHROPIC_API_KEY",
+                }
+                env_key = provider_env_keys.get(provider)
+                api_key = os.environ.get(env_key) if env_key else None
+                if not api_key:
+                    api_key = os.environ.get("OPENAI_API_KEY")
+
             if api_key:
                 kwargs["api_key"] = api_key
-            if self.config.base_url:
-                kwargs["base_url"] = self.config.base_url
-            elif not api_key:
-                kwargs["api_key"] = "placeholder"  # for Ollama-style providers
+            elif provider == "ollama":
+                kwargs["api_key"] = "placeholder"
+            else:
+                raise RuntimeError(
+                    f"Portal LLM api_key is not configured for provider '{provider}'. "
+                    "Please configure portal api_key or copilot api_key."
+                )
+
+            if base_url:
+                kwargs["base_url"] = base_url
 
             self._client = AsyncOpenAI(**kwargs)
         return self._client
@@ -1388,7 +1423,7 @@ class PortalManager:
             try:
                 from ..copilot import get_copilot_service
                 copilot = get_copilot_service()
-                copilot_cfg = copilot.get_config()
+                copilot_cfg = copilot.get_internal_config()
                 provider = copilot_cfg.get("provider", provider)
                 model = copilot_cfg.get("model", model)
                 api_key = copilot_cfg.get("api_key", api_key)

@@ -411,16 +411,28 @@ const ChannelModal: React.FC<{ portalId: string; onClose: () => void }> = ({ por
   const [dingtalkClientSecret, setDingtalkClientSecret] = useState('');
   const [feishuAppId, setFeishuAppId] = useState('');
   const [feishuAppSecret, setFeishuAppSecret] = useState('');
+  const [feishuMode, setFeishuMode] = useState<'ws' | 'webhook'>('ws');
+  const [feishuDomain, setFeishuDomain] = useState('https://open.feishu.cn');
+  const [feishuVerificationToken, setFeishuVerificationToken] = useState('');
+  const [feishuEncryptKey, setFeishuEncryptKey] = useState('');
 
   const [weixinLoginId, setWeixinLoginId] = useState<string | null>(null);
   const [weixinQrUrl, setWeixinQrUrl] = useState<string | null>(null);
   const [weixinStatus, setWeixinStatus] = useState<string>('');
+  const [pairing, setPairing] = useState<Record<string, any>>({});
 
   const refresh = async () => {
     setLoading(true);
     try {
       const data = await (api as any).getPortalChannels(portalId);
       setChannels(data || {});
+      const nextPairing: Record<string, any> = {};
+      for (const ch of ['weixin', 'feishu'] as ChannelName[]) {
+        try {
+          nextPairing[ch] = await (api as any).getPortalChannelAllowlist(portalId, ch);
+        } catch {}
+      }
+      setPairing(nextPairing);
     } finally {
       setLoading(false);
     }
@@ -480,7 +492,14 @@ const ChannelModal: React.FC<{ portalId: string; onClose: () => void }> = ({ por
   const saveFeishu = async () => {
     await (api as any).upsertPortalChannel(portalId, 'feishu', {
       enabled: true,
-      config: { app_id: feishuAppId, app_secret: feishuAppSecret },
+      config: {
+        app_id: feishuAppId,
+        app_secret: feishuAppSecret,
+        mode: feishuMode,
+        domain: feishuDomain,
+        verification_token: feishuVerificationToken,
+        encrypt_key: feishuEncryptKey,
+      },
     });
     setEditing(null);
     await refresh();
@@ -491,6 +510,11 @@ const ChannelModal: React.FC<{ portalId: string; onClose: () => void }> = ({ por
     setWeixinLoginId(data?.login_id);
     setWeixinQrUrl(data?.qrcode_img_content || null);
     setWeixinStatus(data?.status || 'wait');
+  };
+
+  const createPairing = async (channel: ChannelName) => {
+    const data = await (api as any).createPortalChannelPairingCode(portalId, channel, { ttl_seconds: 900 });
+    setPairing(prev => ({ ...prev, [channel]: { ...(prev[channel] || {}), ...data } }));
   };
 
   const unbind = async (channel: ChannelName) => {
@@ -566,8 +590,18 @@ const ChannelModal: React.FC<{ portalId: string; onClose: () => void }> = ({ por
       return (
         <div style={panelStyle}>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>飞书 App 凭证</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className={styles.backBtn} onClick={() => setFeishuMode('ws')} disabled={feishuMode === 'ws'}>WebSocket</button>
+            <button className={styles.backBtn} onClick={() => setFeishuMode('webhook')} disabled={feishuMode === 'webhook'}>Webhook</button>
+          </div>
           <input
-            style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--color-secondary)' }}
+            style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--color-secondary)', marginTop: 8 }}
+            placeholder="Domain (默认 https://open.feishu.cn)"
+            value={feishuDomain}
+            onChange={e => setFeishuDomain(e.target.value)}
+          />
+          <input
+            style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--color-secondary)', marginTop: 8 }}
             placeholder="App ID (cli_xxx)"
             value={feishuAppId}
             onChange={e => setFeishuAppId(e.target.value)}
@@ -578,6 +612,25 @@ const ChannelModal: React.FC<{ portalId: string; onClose: () => void }> = ({ por
             value={feishuAppSecret}
             onChange={e => setFeishuAppSecret(e.target.value)}
           />
+          {feishuMode === 'webhook' && (
+            <>
+              <input
+                style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--color-secondary)', marginTop: 8 }}
+                placeholder="Verification Token（可选）"
+                value={feishuVerificationToken}
+                onChange={e => setFeishuVerificationToken(e.target.value)}
+              />
+              <input
+                style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--color-secondary)', marginTop: 8 }}
+                placeholder="Encrypt Key（可选，用于签名校验）"
+                value={feishuEncryptKey}
+                onChange={e => setFeishuEncryptKey(e.target.value)}
+              />
+              <div style={{ marginTop: 8, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+                Webhook URL：{`${BASE_URL}/api/portals/${portalId}/channels/feishu/webhook`}
+              </div>
+            </>
+          )}
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
             <button className={styles.backBtn} onClick={saveFeishu}>保存并连接</button>
             <button className={styles.backBtn} onClick={() => setEditing(null)}>取消</button>
@@ -607,6 +660,12 @@ const ChannelModal: React.FC<{ portalId: string; onClose: () => void }> = ({ por
             {row('weixin', '微信（扫码登录）', (
               <div style={{ marginTop: 10 }}>
                 <button className={styles.backBtn} onClick={startWeixin} disabled={!!weixinLoginId}>开始扫码</button>
+                <button className={styles.backBtn} style={{ marginLeft: 8 }} onClick={() => createPairing('weixin')}>生成配对码</button>
+                {pairing.weixin?.pairing_code && (
+                  <div style={{ marginTop: 8, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+                    配对码：<span style={{ color: 'var(--color-text)' }}>{pairing.weixin.pairing_code}</span>
+                  </div>
+                )}
                 {weixinLoginId && (
                   <div style={{ marginTop: 10 }}>
                     <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>状态：{weixinStatus || 'wait'}</div>
@@ -621,7 +680,16 @@ const ChannelModal: React.FC<{ portalId: string; onClose: () => void }> = ({ por
             ))}
             {row('telegram', 'Telegram（Token）')}
             {row('dingtalk', '钉钉（Stream）')}
-            {row('feishu', '飞书（WebSocket）')}
+            {row('feishu', '飞书（WebSocket）', (
+              <div style={{ marginTop: 10 }}>
+                <button className={styles.backBtn} onClick={() => createPairing('feishu')}>生成配对码</button>
+                {pairing.feishu?.pairing_code && (
+                  <div style={{ marginTop: 8, fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+                    配对码：<span style={{ color: 'var(--color-text)' }}>{pairing.feishu.pairing_code}</span>
+                  </div>
+                )}
+              </div>
+            ))}
             {editPanel()}
           </>
         )}

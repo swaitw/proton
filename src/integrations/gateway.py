@@ -8,6 +8,8 @@ from ..storage import get_storage_manager, initialize_storage
 from .connectors import DingTalkConnector, FeishuConnector, TelegramConnector, WeixinConnector
 from .connectors.weixin import WeixinQrLoginManager
 from .models import ChannelName, PortalChannelBinding, PortalChannelStatus, WeixinQrStartResponse, WeixinQrStatusResponse
+from .runtime import generate_pairing_code
+from .ssl_bootstrap import ensure_ssl_certs
 from .store import PortalChannelBindingStore
 
 
@@ -84,6 +86,8 @@ class IntegrationsGateway:
         binding = existing or PortalChannelBinding(portal_id=portal_id, channel=channel)
         binding.enabled = enabled
         binding.config = dict(config)
+        if "allowed_users" not in binding.config:
+            binding.config["allowed_users"] = []
         binding.updated_at = datetime.utcnow()
         binding = await self._store.upsert(binding)
         async with self._lock:
@@ -91,6 +95,71 @@ class IntegrationsGateway:
             if binding.enabled:
                 await self._connect_locked(binding)
         return binding
+
+    async def get_allowlist(self, portal_id: str, channel: ChannelName) -> Dict[str, Any]:
+        await self._ensure_ready()
+        if not self._store:
+            raise RuntimeError("storage not ready")
+        binding = await self._store.get(portal_id, channel)
+        if not binding:
+            raise RuntimeError("binding not found")
+        allowed = binding.config.get("allowed_users")
+        return {
+            "allowed_users": allowed if isinstance(allowed, list) else [],
+            "pairing_expires_at": binding.config.get("pairing_expires_at"),
+        }
+
+    async def create_pairing_code(self, portal_id: str, channel: ChannelName, ttl_seconds: int = 900) -> Dict[str, Any]:
+        await self._ensure_ready()
+        if not self._store:
+            raise RuntimeError("storage not ready")
+        binding = await self._store.get(portal_id, channel)
+        if not binding:
+            binding = PortalChannelBinding(portal_id=portal_id, channel=channel)
+        code = generate_pairing_code()
+        binding.config.setdefault("allowed_users", [])
+        binding.config["pairing_code"] = code
+        binding.config["pairing_expires_at"] = int(datetime.utcnow().timestamp()) + max(60, int(ttl_seconds))
+        binding.updated_at = datetime.utcnow()
+        binding = await self._store.upsert(binding)
+        # Keep in-memory connector binding in sync, otherwise periodic state persistence
+        # may overwrite freshly generated pairing metadata with stale config.
+        async with self._lock:
+            conn = self._connectors.get(self._key(portal_id, channel))
+            if conn:
+                conn.binding.config = dict(binding.config)
+                conn.binding.updated_at = binding.updated_at
+        return {
+            "pairing_code": code,
+            "pairing_expires_at": binding.config.get("pairing_expires_at"),
+        }
+
+    async def handle_feishu_webhook(self, portal_id: str, payload: Dict[str, Any], headers: Dict[str, str], raw_body: bytes) -> Dict[str, Any]:
+        await self._ensure_ready()
+        if not self._store:
+            raise RuntimeError("storage not ready")
+        binding = await self._store.get(portal_id, "feishu")
+        if not binding or not binding.enabled:
+            raise RuntimeError("binding not found")
+        async with self._lock:
+            k = self._key(portal_id, "feishu")
+            conn = self._connectors.get(k)
+            if not conn:
+                await self._connect_locked(binding)
+                conn = self._connectors.get(k)
+            if not conn:
+                raise RuntimeError("connector not ready")
+        app_id = str(binding.config.get("app_id") or "").strip()
+        app_secret = str(binding.config.get("app_secret") or "").strip()
+        domain = str(binding.config.get("domain") or "https://open.feishu.cn").strip()
+        if not app_id or not app_secret:
+            raise RuntimeError("missing feishu app_id/app_secret")
+        resp = await conn.handle_webhook(app_id, app_secret, domain, payload, headers, raw_body)
+        try:
+            await self._store.upsert(conn.binding)
+        except Exception:
+            pass
+        return resp
 
     async def delete_binding(self, portal_id: str, channel: ChannelName) -> bool:
         await self._ensure_ready()
@@ -154,7 +223,7 @@ _gateway: Optional[IntegrationsGateway] = None
 
 def get_integrations_gateway() -> IntegrationsGateway:
     global _gateway
+    ensure_ssl_certs()
     if _gateway is None:
         _gateway = IntegrationsGateway()
     return _gateway
-

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 import logging
@@ -99,6 +100,7 @@ class MemPalaceClient:
                             e,
                         )
                         return False
+        return bool(self._ready and self._plugin)
 
     async def health_check(self) -> bool:
         ok = await self.ensure_ready()
@@ -132,6 +134,7 @@ class MemPalaceClient:
             try:
                 async with self._call_lock:
                     result = await self._plugin.call_tool(tool_name, arguments)
+                result = self._normalize_result(result)
                 took_ms = int((time.time() - start) * 1000)
                 logger.debug("MemPalace tool=%s ok took_ms=%s", tool_name, took_ms)
                 return result
@@ -150,6 +153,28 @@ class MemPalaceClient:
                 await asyncio.sleep(self._retry_backoff_s * (2**attempt))
 
         raise RuntimeError("MemPalace call retry loop exhausted")
+
+    @staticmethod
+    def _normalize_result(result: Any) -> Any:
+        """Normalize MCP CallToolResult payloads into plain Python objects."""
+        if isinstance(result, dict):
+            return result
+        structured = getattr(result, "structuredContent", None)
+        if isinstance(structured, dict):
+            return structured
+        content = getattr(result, "content", None)
+        if isinstance(content, list):
+            for item in content:
+                text = getattr(item, "text", None)
+                if isinstance(text, str):
+                    t = text.strip()
+                    if not t:
+                        continue
+                    try:
+                        return json.loads(t)
+                    except Exception:
+                        return {"text": t}
+        return result
 
     async def call_any(self, tool_names: list[str], arguments: Dict[str, Any]) -> Any:
         last_error: Optional[Exception] = None

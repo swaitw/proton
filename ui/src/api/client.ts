@@ -1059,4 +1059,18 @@ export const api = {
     const response = await client.get(`/api/portals/${portalId}/channels/weixin/qr/${loginId}`);
     return response.data;
   },
+
+  async getPortalChannelAllowlist(portalId: string, channel: string): Promise<any> {
+    const response = await client.get(`/api/portals/${portalId}/channels/${channel}/allowlist`);
+    return response.data;
+  },
+
+  async createPortalChannelPairingCode(
+    portalId: string,
+    channel: string,
+    data?: { ttl_seconds?: number },
+  ): Promise<any> {
+    const response = await client.post(`/api/portals/${portalId}/channels/${channel}/pairing`, data ?? {});
+    return response.data;
+  },
 };

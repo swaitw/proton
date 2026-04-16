@@ -29,6 +29,12 @@ class Connector:
         meta = dict(self._meta)
         meta.setdefault("running", running)
         meta.setdefault("healthy", self._healthy)
+        allowed = self.binding.config.get("allowed_users")
+        if isinstance(allowed, list):
+            meta.setdefault("allowlist_count", len(allowed))
+        pairing_expires_at = self.binding.config.get("pairing_expires_at")
+        if pairing_expires_at is not None:
+            meta.setdefault("pairing_expires_at", pairing_expires_at)
         if self._last_success_at is not None:
             meta.setdefault("last_success_at", self._last_success_at)
         return PortalChannelStatus(

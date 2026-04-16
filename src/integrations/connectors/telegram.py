@@ -9,6 +9,7 @@ import aiohttp
 
 from ...portal import get_portal_manager
 from ..models import PortalChannelBinding
+from ..tls import create_aiohttp_session
 from .base import Connector
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ class TelegramConnector(Connector):
         if not token:
             raise RuntimeError("missing telegram token")
 
-        self._session = aiohttp.ClientSession(trust_env=True)
+        self._session = create_aiohttp_session(self.binding.config)
         try:
             me = await self._api(token, "getMe", {}, timeout=20)
             if not me.get("ok"):
@@ -74,7 +75,7 @@ class TelegramConnector(Connector):
                         logger.warning("[%s/%s] handle update failed: %s", self.binding.portal_id, self.binding.channel, str(e))
                 self.binding.state["offset"] = self._offset
         finally:
-            await self._session.aclose()
+            await self._session.close()
             self._session = None
 
     async def _handle_text(self, token: str, chat_id: str, user_id: str, text: str) -> None:
