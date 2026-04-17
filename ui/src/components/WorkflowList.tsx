@@ -68,6 +68,8 @@ const WorkflowList: React.FC<WorkflowListProps> = ({ onSelect }) => {
   const [runningWorkflow, setRunningWorkflow] = useState<Workflow | null>(null);
   const [runInput, setRunInput] = useState('');
   const [isRunning, setIsRunning] = useState(false);
+  const [publishedIds, setPublishedIds] = useState<Set<string>>(new Set());
+  const [publishingId, setPublishingId] = useState<string | null>(null);
 
   // Workflow template states
   const [wfTemplateModalOpen, setWfTemplateModalOpen] = useState(false);
@@ -83,12 +85,35 @@ const WorkflowList: React.FC<WorkflowListProps> = ({ onSelect }) => {
   const loadWorkflows = async () => {
     setLoading(true);
     try {
-      const data = await api.listWorkflows();
+      const [data, published] = await Promise.all([
+        api.listWorkflows(),
+        api.listPublishedWorkflows(),
+      ]);
       setWorkflows(data);
+      setPublishedIds(new Set((published || []).map((p) => p.workflow_id)));
     } catch (error) {
       toast.error('加载工作流失败');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleTogglePublish = async (wf: Workflow) => {
+    if (publishingId) return;
+    setPublishingId(wf.id);
+    try {
+      if (publishedIds.has(wf.id)) {
+        await api.unpublishWorkflow(wf.id);
+        toast.success('已取消发布');
+      } else {
+        await api.publishWorkflow(wf.id, { version: 'v1', tags: ['portal'] });
+        toast.success('已发布');
+      }
+      await loadWorkflows();
+    } catch (error) {
+      toast.error('发布操作失败');
+    } finally {
+      setPublishingId(null);
     }
   };
 
@@ -233,11 +258,23 @@ const WorkflowList: React.FC<WorkflowListProps> = ({ onSelect }) => {
                 <tr key={wf.id}>
                   <td><a className={styles.nameLink} onClick={() => onSelect(wf.id)}>{wf.name}</a></td>
                   <td>{wf.description}</td>
-                  <td><span className={styles.tag} style={{ backgroundColor: 'var(--color-secondary)' }}>{wf.state}</span></td>
+                  <td>
+                    <span className={styles.tag} style={{ backgroundColor: 'var(--color-secondary)', marginRight: 8 }}>{wf.state}</span>
+                    {publishedIds.has(wf.id) && (
+                      <span className={styles.tag} style={{ backgroundColor: '#16a34a', color: '#fff' }}>published</span>
+                    )}
+                  </td>
                   <td>{wf.agent_count}</td>
                   <td>{new Date(wf.updated_at).toLocaleString()}</td>
                   <td>
                     <button className={styles.buttonLink} onClick={() => requestRun(wf)}>运行</button>
+                    <button
+                      className={styles.buttonLink}
+                      onClick={() => handleTogglePublish(wf)}
+                      disabled={publishingId === wf.id}
+                    >
+                      {publishingId === wf.id ? '处理中...' : (publishedIds.has(wf.id) ? '取消发布' : '发布')}
+                    </button>
                     <button className={`${styles.buttonLink} ${styles.buttonLinkDanger}`} onClick={() => requestDelete(wf)}>删除</button>
                   </td>
                 </tr>

@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api, SearchConfig, CopilotConfig, EmailConfig } from '../api/client';
 import styles from './SettingsPanel.module.css';
-import { useToast } from './ToastProvider';
 
 interface SettingsPanelProps {
   visible: boolean;
@@ -9,14 +8,16 @@ interface SettingsPanelProps {
   isPage?: boolean;  // When true, renders as a full page instead of overlay
 }
 
-type TabType = 'search' | 'copilot' | 'email' | 'skills';
+type TabType = 'search' | 'copilot' | 'email';
 
 const SettingsPanel: React.FC<SettingsPanelProps> = ({ visible, onClose, isPage = false }) => {
-  const toast = useToast();
   // Load active tab from localStorage, default to 'search'
   const [activeTab, setActiveTab] = useState<TabType>(() => {
     const saved = localStorage.getItem('proton_settings_active_tab');
-    return (saved as TabType) || 'search';
+    if (saved === 'search' || saved === 'copilot' || saved === 'email') {
+      return saved;
+    }
+    return 'search';
   });
 
   // Search config state
@@ -59,11 +60,6 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ visible, onClose, isPage 
 
   const [error, setError] = useState<string | null>(null);
 
-  const [skills, setSkills] = useState<any[]>([]);
-  const [skillsLoading, setSkillsLoading] = useState(false);
-  const [skillUploadLoading, setSkillUploadLoading] = useState(false);
-  const [skillUninstallLoadingId, setSkillUninstallLoadingId] = useState<string | null>(null);
-
   // Save active tab to localStorage when it changes
   useEffect(() => {
     localStorage.setItem('proton_settings_active_tab', activeTab);
@@ -75,51 +71,8 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ visible, onClose, isPage 
       loadSearchConfig();
       loadCopilotConfig();
       loadEmailConfig();
-      loadSkills();
     }
   }, [visible]);
-
-  const loadSkills = async () => {
-    setSkillsLoading(true);
-    try {
-      const list = await api.listSkills();
-      setSkills(list);
-    } catch (err: any) {
-      setError(`加载技能库失败: ${err.message}`);
-    } finally {
-      setSkillsLoading(false);
-    }
-  };
-
-  const handleUploadSkill = async (file: File) => {
-    setSkillUploadLoading(true);
-    setError(null);
-    try {
-      await api.uploadSkill(file);
-      toast.success('技能上传成功');
-      await loadSkills();
-    } catch (err: any) {
-      const msg = err?.response?.data?.detail || err?.response?.data?.message || err?.message || 'Unknown error';
-      setError(`技能上传失败: ${msg}`);
-    } finally {
-      setSkillUploadLoading(false);
-    }
-  };
-
-  const handleUninstallSkill = async (skillId: string) => {
-    if (skillUninstallLoadingId) return;
-    setSkillUninstallLoadingId(skillId);
-    setError(null);
-    try {
-      await api.uninstallSkill(skillId);
-      toast.success('技能已卸载');
-      await loadSkills();
-    } catch (err: any) {
-      setError(`技能卸载失败: ${err.message}`);
-    } finally {
-      setSkillUninstallLoadingId(null);
-    }
-  };
 
   const loadSearchConfig = async () => {
     try {
@@ -300,12 +253,6 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ visible, onClose, isPage 
             onClick={() => setActiveTab('copilot')}
           >
             🤖 AI Copilot
-          </button>
-          <button
-            className={`${styles.pageTab} ${activeTab === 'skills' ? styles.active : ''}`}
-            onClick={() => setActiveTab('skills')}
-          >
-            📦 技能库
           </button>
         </div>
 
@@ -719,6 +666,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ visible, onClose, isPage 
                   <option value="glm-4">GLM-4</option>
                   <option value="glm-4-plus">GLM-4 Plus</option>
                   <option value="glm-4-air">GLM-4 Air</option>
+                  <option value="glm-4.5-air">GLM-4.5 Air</option>
                 </>
               )}
               {copilotProvider === 'deepseek' && (
@@ -780,89 +728,6 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ visible, onClose, isPage 
       );
     }
 
-    if (activeTab === 'skills') {
-      return (
-        <div className={styles.section}>
-          <p className={styles.intro}>
-            技能包全局安装；在各个 Agent 中勾选启用即可使用。
-          </p>
-
-          <div className={styles.subCard}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-              <div>
-                <div style={{ fontWeight: 700, color: 'var(--color-text)' }}>上传技能包</div>
-                <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>支持 .zip 或 .skill</div>
-              </div>
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="file"
-                  accept=".zip,.skill"
-                  style={{ display: 'none' }}
-                  onChange={async (e) => {
-                    const file = e.target.files?.[0];
-                    e.target.value = '';
-                    if (!file) return;
-                    await handleUploadSkill(file);
-                  }}
-                />
-                <button
-                  className={styles.testBtn}
-                  disabled={skillUploadLoading}
-                  onClick={(e) => (e.currentTarget.previousSibling as HTMLInputElement).click()}
-                >
-                  {skillUploadLoading ? '上传中...' : '选择文件'}
-                </button>
-              </label>
-            </div>
-          </div>
-
-          <div className={styles.subCard}>
-            <div style={{ fontWeight: 700, color: 'var(--color-text)', marginBottom: 10 }}>已安装技能</div>
-            {skillsLoading ? (
-              <div style={{ color: 'var(--color-text-muted)' }}>加载中...</div>
-            ) : skills.length === 0 ? (
-              <div style={{ color: 'var(--color-text-muted)' }}>暂无已安装技能</div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {skills.map((s) => {
-                  const busy = skillUninstallLoadingId === s.id;
-                  return (
-                    <div
-                      key={s.id}
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        gap: 12,
-                        padding: 10,
-                        border: '1px solid var(--color-secondary)',
-                        borderRadius: 'var(--radius-md)',
-                        background: 'var(--color-background)',
-                      }}
-                    >
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontWeight: 700, color: 'var(--color-text)' }}>{s.name}</div>
-                        <div style={{ color: 'var(--color-text-muted)', fontSize: 13, marginTop: 4, whiteSpace: 'pre-wrap' }}>
-                          {s.description}
-                        </div>
-                        <div style={{ color: 'var(--color-text-muted)', fontSize: 12, marginTop: 6 }}>
-                          版本: {s.version} · 安装时间: {new Date(s.installed_at).toLocaleString()}
-                        </div>
-                      </div>
-                      <div style={{ flexShrink: 0 }}>
-                        <button className={styles.testBtn} disabled={busy} onClick={() => handleUninstallSkill(s.id)}>
-                          {busy ? '卸载中...' : '卸载'}
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    }
-
     return null;
   }
 
@@ -901,12 +766,6 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ visible, onClose, isPage 
             onClick={() => setActiveTab('copilot')}
           >
             AI Copilot
-          </button>
-          <button
-            className={`${styles.tab} ${activeTab === 'skills' ? styles.active : ''}`}
-            onClick={() => setActiveTab('skills')}
-          >
-            技能库
           </button>
         </div>
 

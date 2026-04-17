@@ -19,13 +19,14 @@ import os
 import secrets
 import re
 from datetime import datetime
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Set
 from uuid import uuid4
 
 from ..execution.backends.local import LocalProcessBackend
 from ..core.context import ContextOffloader, ExecutionContext
 from ..core.models import (
     ChatMessage,
+    ExecutionEventType,
     IntentUnderstandingResult,
     PortalConversationMessage,
     PortalEvent,
@@ -125,10 +126,12 @@ class PortalService:
         config: SuperPortalConfig,
         workflow_manager: WorkflowManager,
         storage: StorageManager,
+        portal_manager: Optional["PortalManager"] = None,
     ):
         self.config = config
         self._wf_manager = workflow_manager
         self._storage = storage
+        self._portal_manager = portal_manager
         
         client = MemPalaceClient(
             palace_path=getattr(config, "mempalace_palace_path", None),
@@ -193,6 +196,8 @@ class PortalService:
         user_message: str,
         user_id: str = "default",
         stream: bool = True,
+        _route_depth: int = 0,
+        _visited_portal_ids: Optional[Set[str]] = None,
     ) -> AsyncIterator[PortalEvent]:
         """
         Process a user message and stream PortalEvents.
@@ -258,6 +263,17 @@ class PortalService:
 
         # 4. Get available workflows
         available_wfs = await self._get_available_workflows()
+        visited_portals: Set[str] = set(_visited_portal_ids or set())
+        visited_portals.add(self.config.id)
+        available_child_portals = await self._get_available_child_portals(visited_portals)
+        logger.info(
+            "[PortalRoute] portal=%s depth=%s child_candidates=%s workflow_candidates=%s disabled_child_ids=%s",
+            self.config.id,
+            _route_depth,
+            [p.get("id") for p in available_child_portals],
+            len(available_wfs),
+            getattr(self.config, "disabled_child_portal_ids", []),
+        )
 
         # Decide path: workflow dispatch vs backbone direct reply
         use_backbone = False
@@ -265,8 +281,116 @@ class PortalService:
         intent_result: Optional[IntentUnderstandingResult] = None
         dispatched_workflow_ids: List[str] = []
         workflow_results: Dict[str, str] = {}
+        child_portal_dispatched = False
 
-        if not available_wfs:
+        # 4.1 Child portal routing has higher priority than local workflow routing
+        if available_child_portals and _route_depth < 2:
+            portal_intent = await intent_svc.understand(
+                user_query=user_message,
+                available_children=available_child_portals,
+                conversation_history=history,
+                memories=memories,
+                memory_snapshot=memory_snapshot,
+                session_retrievals=session_retrievals,
+                max_selected=max(1, int(self.config.max_portals_per_request)),
+                min_relevance_score=0.65,
+            )
+            logger.info(
+                "[PortalRoute] portal_intent selected=%s status=%s note=%s clarification_needed=%s confidence=%s",
+                [p.workflow_id for p in portal_intent.dispatch_plans],
+                portal_intent.routing_status,
+                portal_intent.routing_note,
+                portal_intent.clarification_needed,
+                getattr(portal_intent, "confidence", None),
+            )
+            if portal_intent.dispatch_plans:
+                child_portal_dispatched = True
+                for plan in portal_intent.dispatch_plans:
+                    dispatched_workflow_ids.append(f"portal:{plan.workflow_id}")
+                    yield PortalEvent(
+                        type=PortalEventType.PORTAL_DISPATCH_START,
+                        session_id=session_id,
+                        portal_id=self.config.id,
+                        workflow_id=plan.workflow_id,
+                        workflow_name=plan.workflow_name,
+                        metadata={"route_depth": _route_depth + 1},
+                    )
+                    child_result = f"[Portal 路由失败: child portal not found: {plan.workflow_id}]"
+                    child_service = None
+                    if self._portal_manager:
+                        child_service = await self._portal_manager.get_service(plan.workflow_id)
+
+                    if child_service:
+                        child_session = await child_service.create_session(
+                            user_id=user_id,
+                            metadata={"source_portal_id": self.config.id, "route_depth": _route_depth + 1},
+                        )
+                        child_chunks: List[str] = []
+                        async for child_ev in child_service.chat(
+                            session_id=child_session.session_id,
+                            user_message=plan.sub_query,
+                            user_id=user_id,
+                            stream=True,
+                            _route_depth=_route_depth + 1,
+                            _visited_portal_ids=set(visited_portals),
+                        ):
+                            if child_ev.type == PortalEventType.CONTENT and child_ev.delta:
+                                child_chunks.append(child_ev.delta)
+                                continue
+
+                            if child_ev.type in {
+                                PortalEventType.INTENT_UNDERSTOOD,
+                                PortalEventType.WORKFLOW_DISPATCH_START,
+                                PortalEventType.WORKFLOW_DISPATCH_RESULT,
+                                PortalEventType.WORKFLOW_EXECUTION_EVENT,
+                                PortalEventType.SYNTHESIS_START,
+                                PortalEventType.ERROR,
+                            }:
+                                yield PortalEvent(
+                                    type=PortalEventType.WORKFLOW_EXECUTION_EVENT,
+                                    session_id=session_id,
+                                    portal_id=self.config.id,
+                                    workflow_id=plan.workflow_id,
+                                    workflow_name=plan.workflow_name,
+                                    metadata={
+                                        "source": "child_portal",
+                                        "child_portal_id": plan.workflow_id,
+                                        "child_portal_name": plan.workflow_name,
+                                        "child_event_type": child_ev.type,
+                                        "child_event": child_ev.model_dump(mode="json", exclude_none=True),
+                                    },
+                                )
+
+                        child_result = "".join(child_chunks).strip() or "(子 Portal 未返回内容)"
+                    workflow_results[f"portal:{plan.workflow_id}"] = child_result
+                    yield PortalEvent(
+                        type=PortalEventType.PORTAL_DISPATCH_RESULT,
+                        session_id=session_id,
+                        portal_id=self.config.id,
+                        workflow_id=plan.workflow_id,
+                        workflow_name=plan.workflow_name,
+                        workflow_result=child_result[:500],
+                    )
+            else:
+                if portal_intent.routing_status == "filtered_by_relevance":
+                    logger.info(
+                        "[PortalRoute] no child portal dispatched: candidates filtered by relevance threshold. note=%s",
+                        portal_intent.routing_note,
+                    )
+                elif portal_intent.routing_status == "intent_error":
+                    logger.warning(
+                        "[PortalRoute] no child portal dispatched: intent understanding failed. note=%s",
+                        portal_intent.routing_note,
+                    )
+                else:
+                    logger.info(
+                        "[PortalRoute] no child portal dispatched: no relevant child matched. note=%s",
+                        portal_intent.routing_note,
+                    )
+
+        if child_portal_dispatched:
+            use_backbone = False
+        elif not available_wfs:
             # No workflows → Backbone direct reply (if enabled)
             if self.config.fallback_to_copilot:
                 use_backbone = True
@@ -281,7 +405,18 @@ class PortalService:
                 memories=memories,
                 memory_snapshot=memory_snapshot,
                 session_retrievals=session_retrievals,
+                max_selected=max(1, int(self.config.max_workflows_per_request)),
             )
+            if intent_result is None:
+                if self.config.fallback_to_copilot:
+                    use_backbone = True
+                else:
+                    direct_reply_when_fallback_disabled = NO_MATCH_FALLBACK_DISABLED_MESSAGE
+                intent_result = IntentUnderstandingResult(
+                    original_query=user_message,
+                    understood_intent=user_message,
+                    dispatch_plans=[],
+                )
 
             yield PortalEvent(
                 type=PortalEventType.INTENT_UNDERSTOOD,
@@ -341,27 +476,38 @@ class PortalService:
                             workflow_name=plan.workflow_name,
                         )
 
-                    tasks = [
-                        self._run_workflow(plan.workflow_id, plan.sub_query, context=exec_context)
-                        for plan in group
-                    ]
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for plan in group:
+                        result_text = ""
+                        try:
+                            async for exec_event in self._wf_manager.run_workflow_stream_events(
+                                workflow_id=plan.workflow_id,
+                                input_message=plan.sub_query,
+                                context=exec_context,
+                            ):
+                                if exec_event.event_type == ExecutionEventType.NODE_COMPLETE and exec_event.content:
+                                    result_text = exec_event.content
+                                elif not result_text and exec_event.delta_content:
+                                    result_text += exec_event.delta_content
 
-                    for plan, result in zip(group, results):
-                        if isinstance(result, BaseException):
-                            result_text = f"[工作流 {plan.workflow_name} 执行出错: {result}]"
-                        else:
-                            result_text = result or "(无输出)"
+                                yield PortalEvent(
+                                    type=PortalEventType.WORKFLOW_EXECUTION_EVENT,
+                                    session_id=session_id,
+                                    portal_id=self.config.id,
+                                    workflow_id=plan.workflow_id,
+                                    workflow_name=plan.workflow_name,
+                                    metadata={"execution_event": exec_event.model_dump(mode="json", exclude_none=True)},
+                                )
+                        except Exception as e:
+                            result_text = f"[工作流 {plan.workflow_name} 执行出错: {e}]"
 
-                        workflow_results[plan.workflow_id] = result_text
-
+                        workflow_results[plan.workflow_id] = result_text or "(无输出)"
                         yield PortalEvent(
                             type=PortalEventType.WORKFLOW_DISPATCH_RESULT,
                             session_id=session_id,
                             portal_id=self.config.id,
                             workflow_id=plan.workflow_id,
                             workflow_name=plan.workflow_name,
-                            workflow_result=result_text[:500],
+                            workflow_result=(result_text or "(无输出)")[:500],
                         )
 
         # 7. Generate response — Backbone direct or Synthesis
@@ -444,20 +590,9 @@ class PortalService:
 
                 understood_intent_str = intent_result.understood_intent if intent_result else ""
 
-                final_answer = await self._synthesise(
-                    client=client,
-                    user_query=user_message,
-                    intent=understood_intent_str,
-                    workflow_results=workflow_results,
-                    memories=memories,
-                    memory_snapshot=memory_snapshot,
-                    session_retrievals=session_retrievals,
-                    history=history,
-                    stream_callback=None,
-                )
-
                 # Stream final answer character by character (chunked)
                 if stream:
+                    streamed_chunks: List[str] = []
                     async for chunk in self._stream_synthesis(
                         client=client,
                         user_query=user_message,
@@ -474,7 +609,22 @@ class PortalService:
                             portal_id=self.config.id,
                             delta=chunk,
                         )
-                    final_answer_for_session = await self._synthesise(
+                        streamed_chunks.append(chunk)
+                    final_answer_for_session = "".join(streamed_chunks).strip()
+                    if not final_answer_for_session:
+                        # Defensive fallback when stream unexpectedly yields no text.
+                        final_answer_for_session = await self._synthesise(
+                            client=client,
+                            user_query=user_message,
+                            intent=understood_intent_str,
+                            workflow_results=workflow_results,
+                            memories=memories,
+                            memory_snapshot=memory_snapshot,
+                            session_retrievals=session_retrievals,
+                            history=history,
+                        )
+                else:
+                    final_answer = await self._synthesise(
                         client=client,
                         user_query=user_message,
                         intent=understood_intent_str,
@@ -483,8 +633,8 @@ class PortalService:
                         memory_snapshot=memory_snapshot,
                         session_retrievals=session_retrievals,
                         history=history,
+                        stream_callback=None,
                     )
-                else:
                     yield PortalEvent(
                         type=PortalEventType.CONTENT,
                         session_id=session_id,
@@ -512,23 +662,33 @@ class PortalService:
 
         # 10. Extract and store memories (non-blocking)
         if self.config.memory_enabled and not blocked_by_safety:
-            asyncio.create_task(self._extract_memories(
-                client=client,
-                session=session,
-                user_message=user_message,
-                assistant_response=final_answer_for_session,
+            self._spawn_background_task(
+                self._extract_memories(
+                    client=client,
+                    session=session,
+                    user_message=user_message,
+                    assistant_response=final_answer_for_session,
+                    user_id=user_id,
+                ),
+                task_name="extract_memories",
+                session_id=session_id,
                 user_id=user_id,
-            ))
+            )
 
         # 11. Extract trajectory signals (non-blocking, L1 precipitation)
         if not blocked_by_safety:
-            asyncio.create_task(self._extract_trajectory_bg(
+            self._spawn_background_task(
+                self._extract_trajectory_bg(
+                    session_id=session_id,
+                    user_message=user_message,
+                    assistant_response=final_answer_for_session,
+                    dispatched_workflow_ids=dispatched_workflow_ids,
+                    workflow_results=workflow_results,
+                ),
+                task_name="extract_trajectory",
                 session_id=session_id,
-                user_message=user_message,
-                assistant_response=final_answer_for_session,
-                dispatched_workflow_ids=dispatched_workflow_ids,
-                workflow_results=workflow_results,
-            ))
+                user_id=user_id,
+            )
 
         yield PortalEvent(
             type=PortalEventType.COMPLETE,
@@ -771,6 +931,75 @@ class PortalService:
 
         return result
 
+    async def _get_available_child_portals(self, exclude_ids: Set[str]) -> List[Dict[str, Any]]:
+        if not self._portal_manager:
+            return []
+        result: List[Dict[str, Any]] = []
+        seen_ids: Set[str] = set()
+        disabled_ids = {str(pid) for pid in (self.config.disabled_child_portal_ids or []) if str(pid)}
+
+        # Root default behavior: auto-discover all non-default portals
+        if self.config.is_default and self.config.auto_discover_child_portals:
+            all_portals = await self._portal_manager.list_portals()
+            for cfg in all_portals:
+                if cfg.id in exclude_ids or cfg.id in disabled_ids:
+                    continue
+                if cfg.is_default:
+                    continue
+                result.append({
+                    "id": cfg.id,
+                    "name": cfg.name,
+                    "description": cfg.description,
+                })
+                seen_ids.add(cfg.id)
+
+        # Explicit bindings (always honored unless excluded/disabled)
+        for portal_id in self.config.child_portal_ids:
+            if not portal_id or portal_id in exclude_ids:
+                continue
+            if portal_id in disabled_ids or portal_id in seen_ids:
+                continue
+            cfg = await self._portal_manager.get_portal(portal_id)
+            if not cfg:
+                continue
+            result.append({
+                "id": cfg.id,
+                "name": cfg.name,
+                "description": cfg.description,
+            })
+        return result
+
+    async def _run_child_portal(
+        self,
+        child_portal_id: str,
+        sub_query: str,
+        user_id: str,
+        route_depth: int,
+        visited_portals: Set[str],
+    ) -> str:
+        if not self._portal_manager:
+            return "[Portal 路由失败: portal_manager unavailable]"
+        child_service = await self._portal_manager.get_service(child_portal_id)
+        if not child_service:
+            return f"[Portal 路由失败: child portal not found: {child_portal_id}]"
+
+        child_session = await child_service.create_session(
+            user_id=user_id,
+            metadata={"source_portal_id": self.config.id, "route_depth": route_depth},
+        )
+        chunks: List[str] = []
+        async for ev in child_service.chat(
+            session_id=child_session.session_id,
+            user_message=sub_query,
+            user_id=user_id,
+            stream=False,
+            _route_depth=route_depth,
+            _visited_portal_ids=set(visited_portals),
+        ):
+            if ev.type == PortalEventType.CONTENT and ev.delta:
+                chunks.append(ev.delta)
+        return "".join(chunks).strip() or "(子 Portal 未返回内容)"
+
     async def _run_workflow(
         self,
         workflow_id: str,
@@ -857,6 +1086,47 @@ class PortalService:
         except Exception as e:
             logger.error(f"[Portal] Backbone stream reply failed: {e}")
             yield f"抱歉，处理您的请求时遇到了问题: {e}"
+
+    def _spawn_background_task(self, coro, task_name: str, **meta: Any) -> None:
+        """Spawn a detached task with explicit completion/cancel/error observability."""
+        task = asyncio.create_task(coro)
+        task.add_done_callback(
+            lambda t: self._on_background_task_done(t, task_name=task_name, meta=meta)
+        )
+
+    def _on_background_task_done(self, task: asyncio.Task, task_name: str, meta: Dict[str, Any]) -> None:
+        try:
+            if task.cancelled():
+                logger.info(
+                    "[PortalBG] task cancelled: name=%s portal_id=%s meta=%s",
+                    task_name,
+                    self.config.id,
+                    meta,
+                )
+                return
+            exc = task.exception()
+            if exc:
+                logger.warning(
+                    "[PortalBG] task failed: name=%s portal_id=%s meta=%s error=%s",
+                    task_name,
+                    self.config.id,
+                    meta,
+                    exc,
+                )
+            else:
+                logger.debug(
+                    "[PortalBG] task completed: name=%s portal_id=%s meta=%s",
+                    task_name,
+                    self.config.id,
+                    meta,
+                )
+        except Exception as e:
+            logger.warning(
+                "[PortalBG] task callback failed: name=%s portal_id=%s error=%s",
+                task_name,
+                self.config.id,
+                e,
+            )
 
     async def _extract_trajectory_bg(
         self,
@@ -946,6 +1216,13 @@ class PortalService:
                 except Exception as e:
                     logger.warning(f"[Portal] L2 learning cycle failed: {e}")
 
+        except asyncio.CancelledError:
+            logger.info(
+                "[PortalBG] trajectory extraction cancelled: portal_id=%s session_id=%s",
+                self.config.id,
+                session_id,
+            )
+            raise
         except Exception as e:
             logger.error(f"[Portal] Trajectory extraction error: {e}")
 
@@ -1096,6 +1373,14 @@ Please synthesise the above into a helpful, integrated response."""
                 assistant_response=assistant_response,
             )
             logger.debug("[Portal] Extracted memories via MemPalace.")
+        except asyncio.CancelledError:
+            logger.info(
+                "[PortalBG] memory extraction cancelled: portal_id=%s session_id=%s user_id=%s",
+                self.config.id,
+                session.session_id,
+                user_id,
+            )
+            raise
         except Exception as e:
             logger.error(f"[Portal] Memory extraction error: {e}")
 
@@ -1227,6 +1512,7 @@ class PortalManager:
         name: str,
         description: str = "",
         workflow_ids: Optional[List[str]] = None,
+        child_portal_ids: Optional[List[str]] = None,
         provider: str = "openai",
         model: str = "gpt-4",
         api_key: Optional[str] = None,
@@ -1242,6 +1528,10 @@ class PortalManager:
         mempalace_default_room: str = "general",
         is_default: bool = False,
         auto_include_published: bool = False,
+        auto_discover_child_portals: bool = True,
+        disabled_child_portal_ids: Optional[List[str]] = None,
+        max_portals_per_request: int = 1,
+        max_workflows_per_request: int = 3,
         fallback_to_copilot: bool = True,
         backbone_system_prompt: str = DEFAULT_BACKBONE_SYSTEM_PROMPT,
         workspace_dir: Optional[str] = None,
@@ -1252,6 +1542,7 @@ class PortalManager:
             name=name,
             description=description,
             workflow_ids=workflow_ids or [],
+            child_portal_ids=child_portal_ids or [],
             provider=provider,
             model=model,
             api_key=api_key,
@@ -1268,6 +1559,10 @@ class PortalManager:
             api_key_access=f"portal_{secrets.token_urlsafe(24)}",
             is_default=is_default,
             auto_include_published=auto_include_published,
+            auto_discover_child_portals=auto_discover_child_portals,
+            disabled_child_portal_ids=disabled_child_portal_ids or [],
+            max_portals_per_request=max(1, int(max_portals_per_request)),
+            max_workflows_per_request=max(1, int(max_workflows_per_request)),
             fallback_to_copilot=fallback_to_copilot,
             backbone_system_prompt=backbone_system_prompt,
             workspace_dir=workspace_dir,
@@ -1285,6 +1580,7 @@ class PortalManager:
         name: str,
         description: str = "",
         workflow_ids: Optional[List[str]] = None,
+        child_portal_ids: Optional[List[str]] = None,
         provider: str = "openai",
         model: str = "gpt-4",
         api_key: Optional[str] = None,
@@ -1300,6 +1596,10 @@ class PortalManager:
         mempalace_default_room: str = "general",
         is_default: bool = False,
         auto_include_published: bool = False,
+        auto_discover_child_portals: bool = True,
+        disabled_child_portal_ids: Optional[List[str]] = None,
+        max_portals_per_request: int = 1,
+        max_workflows_per_request: int = 3,
         fallback_to_copilot: bool = True,
         backbone_system_prompt: str = DEFAULT_BACKBONE_SYSTEM_PROMPT,
         workspace_dir: Optional[str] = None,
@@ -1311,6 +1611,7 @@ class PortalManager:
                 name=name,
                 description=description,
                 workflow_ids=workflow_ids,
+                child_portal_ids=child_portal_ids,
                 provider=provider,
                 model=model,
                 api_key=api_key,
@@ -1326,6 +1627,10 @@ class PortalManager:
                 mempalace_default_room=mempalace_default_room,
                 is_default=is_default,
                 auto_include_published=auto_include_published,
+                auto_discover_child_portals=auto_discover_child_portals,
+                disabled_child_portal_ids=disabled_child_portal_ids,
+                max_portals_per_request=max_portals_per_request,
+                max_workflows_per_request=max_workflows_per_request,
                 fallback_to_copilot=fallback_to_copilot,
                 backbone_system_prompt=backbone_system_prompt,
                 workspace_dir=workspace_dir,
@@ -1351,7 +1656,7 @@ class PortalManager:
                 return None
 
             allowed = {
-                "name", "description", "workflow_ids",
+                "name", "description", "workflow_ids", "child_portal_ids",
                 "provider", "model", "api_key", "base_url",
                 "memory_enabled", "global_memory_enabled",
                 "memory_provider", "mempalace_palace_path", "mempalace_command",
@@ -1359,6 +1664,8 @@ class PortalManager:
                 "mempalace_default_room",
                 "max_session_messages", "session_ttl_hours", "public",
                 "is_default", "auto_include_published", "fallback_to_copilot",
+                "auto_discover_child_portals", "disabled_child_portal_ids",
+                "max_portals_per_request", "max_workflows_per_request",
                 "backbone_system_prompt",
                 "workspace_dir",
             }
@@ -1464,6 +1771,7 @@ class PortalManager:
                 config=config,
                 workflow_manager=self._wf_manager,
                 storage=self._storage,
+                portal_manager=self,
             )
 
         return self._services[portal_id]

@@ -50,7 +50,7 @@ PROVIDER_DEFAULTS = {
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "env_key": "ZHIPU_API_KEY",
         "default_model": "glm-4",
-        "models": ["glm-4", "glm-4-plus", "glm-4-air", "glm-4-airx", "glm-4-flash", "glm-4v"],
+        "models": ["glm-4", "glm-4-plus", "glm-4-air", "glm-4.5-air", "glm-4-airx", "glm-4-flash", "glm-4v"],
     },
     "deepseek": {
         "base_url": "https://api.deepseek.com",

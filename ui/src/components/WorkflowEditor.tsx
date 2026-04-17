@@ -53,6 +53,8 @@ const WorkflowEditor: React.FC<WorkflowEditorProps> = ({ workflowId, onWorkflowC
   const [currentWorkflowId, setCurrentWorkflowId] = useState<string | null>(workflowId);
   const [workflowName, setWorkflowName] = useState<string>('New Workflow');
   const [isSaving, setIsSaving] = useState(false);
+  const [isPublished, setIsPublished] = useState(false);
+  const [publishBusy, setPublishBusy] = useState(false);
 
   // Use ref to always have access to the latest workflowId in callbacks
   const currentWorkflowIdRef = useRef<string | null>(currentWorkflowId);
@@ -90,10 +92,12 @@ const WorkflowEditor: React.FC<WorkflowEditorProps> = ({ workflowId, onWorkflowC
   useEffect(() => {
     if (currentWorkflowId) {
       loadWorkflow(currentWorkflowId);
+      refreshPublishedState(currentWorkflowId);
     } else {
       setNodes([]);
       setEdges([]);
       setWorkflowName('New Workflow');
+      setIsPublished(false);
     }
   }, [currentWorkflowId]);
 
@@ -173,6 +177,35 @@ const WorkflowEditor: React.FC<WorkflowEditorProps> = ({ workflowId, onWorkflowC
       setTemplates(await api.getTemplates());
     } catch (error) {
       console.error('Failed to load templates:', error);
+    }
+  };
+
+  const refreshPublishedState = async (id: string) => {
+    try {
+      const published = await api.listPublishedWorkflows();
+      setIsPublished((published || []).some((p) => p.workflow_id === id));
+    } catch {
+      setIsPublished(false);
+    }
+  };
+
+  const handleTogglePublish = async () => {
+    if (!currentWorkflowId || publishBusy) return;
+    setPublishBusy(true);
+    try {
+      if (isPublished) {
+        await api.unpublishWorkflow(currentWorkflowId);
+        setIsPublished(false);
+        toast.success('已取消发布');
+      } else {
+        await api.publishWorkflow(currentWorkflowId, { version: 'v1', tags: ['portal'] });
+        setIsPublished(true);
+        toast.success('已发布');
+      }
+    } catch {
+      toast.error('发布操作失败');
+    } finally {
+      setPublishBusy(false);
     }
   };
 
@@ -332,6 +365,14 @@ const WorkflowEditor: React.FC<WorkflowEditorProps> = ({ workflowId, onWorkflowC
       <div className={styles.header}>
         <h2 className={styles.title}>工作流编辑器</h2>
         <div className={styles.actions}>
+          <button
+            className={styles.button}
+            onClick={handleTogglePublish}
+            disabled={!currentWorkflowId || publishBusy}
+            title={!currentWorkflowId ? '请先创建并保存工作流' : ''}
+          >
+            {publishBusy ? '处理中...' : (isPublished ? '取消发布' : '发布')}
+          </button>
           <div className={styles.dropdown}>
             <button className={styles.button}>添加 Agent</button>
             <div className={styles.dropdownContent}>
@@ -367,6 +408,11 @@ const WorkflowEditor: React.FC<WorkflowEditorProps> = ({ workflowId, onWorkflowC
           <Panel position="top-left">
             <div className={styles.panel}>
               <b>{currentWorkflowId ? workflowName : '📝 新工作流 (未保存)'}</b>
+              {currentWorkflowId && (
+                <span style={{ marginLeft: 8, color: isPublished ? '#16a34a' : '#94a3b8' }}>
+                  {isPublished ? '● published' : '● draft'}
+                </span>
+              )}
             </div>
           </Panel>
         </ReactFlow>

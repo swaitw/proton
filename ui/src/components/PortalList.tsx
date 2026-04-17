@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import styles from './PortalList.module.css';
 import { useToast } from './ToastProvider';
@@ -11,7 +11,13 @@ export interface Portal {
   id: string;
   name: string;
   description: string;
+  is_default?: boolean;
   workflow_ids: string[];
+  child_portal_ids?: string[];
+  auto_discover_child_portals?: boolean;
+  disabled_child_portal_ids?: string[];
+  max_portals_per_request?: number;
+  max_workflows_per_request?: number;
   provider: string;
   model: string;
   api_key?: string;
@@ -47,7 +53,7 @@ interface PortalListProps {
 const MODELS: Record<string, string[]> = {
   openai:    ['gpt-4o', 'gpt-4', 'gpt-4-turbo', 'gpt-3.5-turbo'],
   deepseek:  ['deepseek-chat', 'deepseek-coder'],
-  zhipu:     ['glm-4', 'glm-4-flash', 'glm-3-turbo'],
+  zhipu:     ['glm-4', 'glm-4-flash', 'glm-4.5-air', 'glm-3-turbo'],
   qwen:      ['qwen-plus', 'qwen-max', 'qwen-turbo'],
   moonshot:  ['moonshot-v1-8k', 'moonshot-v1-32k'],
   anthropic: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229'],
@@ -67,7 +73,11 @@ function fmtDate(iso: string) {
 interface FormState {
   name: string;
   description: string;
+  is_default: boolean;
   workflow_ids: string[];
+  child_portal_ids: string[];
+  auto_discover_child_portals: boolean;
+  disabled_child_portal_ids: string[];
   provider: string;
   model: string;
   api_key: string;
@@ -83,7 +93,11 @@ interface FormState {
 const defaultForm = (): FormState => ({
   name: '',
   description: '',
+  is_default: false,
   workflow_ids: [],
+  child_portal_ids: [],
+  auto_discover_child_portals: true,
+  disabled_child_portal_ids: [],
   provider: 'openai',
   model: 'gpt-4o',
   api_key: '',
@@ -98,19 +112,109 @@ const defaultForm = (): FormState => ({
 
 interface PortalModalProps {
   portal: Portal | null;           // null = create mode
+  portals: Portal[];
   workflows: Workflow[];
   onClose: () => void;
   onSave: (data: FormState, id?: string) => Promise<void>;
 }
 
-const PortalModal: React.FC<PortalModalProps> = ({ portal, workflows, onClose, onSave }) => {
+const WorkflowSelector = React.memo(function WorkflowSelector({
+  workflows,
+  selectedIds,
+  onToggle,
+}: {
+  workflows: Workflow[];
+  selectedIds: string[];
+  onToggle: (id: string) => void;
+}) {
+  const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
+  return (
+    <div className={styles.wfList}>
+      {workflows.length === 0 ? (
+        <div className={styles.wfEmpty}>暂无已发布的工作流</div>
+      ) : (
+        workflows.map(wf => {
+          const checked = selected.has(wf.id);
+          return (
+            <div
+              key={wf.id}
+              className={`${styles.wfItem} ${checked ? styles.wfItemChecked : ''}`}
+              onClick={() => onToggle(wf.id)}
+            >
+              <input
+                type="checkbox"
+                className={styles.wfCheckbox}
+                checked={checked}
+                onChange={() => {}}
+              />
+              <div className={styles.wfItemInfo}>
+                <div className={styles.wfItemName}>{wf.name}</div>
+                {wf.description && (
+                  <div className={styles.wfItemDesc}>{wf.description}</div>
+                )}
+              </div>
+              <div className={styles.wfItemMeta}>{wf.agent_count} 个 agent</div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+});
+
+const DisabledPortalSelector = React.memo(function DisabledPortalSelector({
+  portals,
+  selectedIds,
+  onToggle,
+}: {
+  portals: Portal[];
+  selectedIds: string[];
+  onToggle: (id: string) => void;
+}) {
+  const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
+  return (
+    <div className={styles.wfList}>
+      {portals.length === 0 ? (
+        <div className={styles.wfEmpty}>暂无可排除的子 Portal</div>
+      ) : (
+        portals.map(p => {
+          const checked = selected.has(p.id);
+          return (
+            <div
+              key={p.id}
+              className={`${styles.wfItem} ${checked ? styles.wfItemChecked : ''}`}
+              onClick={() => onToggle(p.id)}
+            >
+              <input
+                type="checkbox"
+                className={styles.wfCheckbox}
+                checked={checked}
+                onChange={() => {}}
+              />
+              <div className={styles.wfItemInfo}>
+                <div className={styles.wfItemName}>{p.name}</div>
+                {p.description && <div className={styles.wfItemDesc}>{p.description}</div>}
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+});
+
+const PortalModal: React.FC<PortalModalProps> = ({ portal, portals, workflows, onClose, onSave }) => {
   const toast = useToast();
   const [form, setForm] = useState<FormState>(() =>
     portal
       ? {
           name: portal.name,
           description: portal.description,
+          is_default: !!portal.is_default,
           workflow_ids: portal.workflow_ids,
+          child_portal_ids: portal.child_portal_ids ?? [],
+          auto_discover_child_portals: portal.auto_discover_child_portals ?? true,
+          disabled_child_portal_ids: portal.disabled_child_portal_ids ?? [],
           provider: portal.provider,
           model: portal.model,
           api_key: portal.api_key ?? '',
@@ -128,14 +232,23 @@ const PortalModal: React.FC<PortalModalProps> = ({ portal, workflows, onClose, o
 
   const set = (k: keyof FormState, v: any) => setForm(f => ({ ...f, [k]: v }));
 
-  const toggleWf = (id: string) => {
-    set(
-      'workflow_ids',
-      form.workflow_ids.includes(id)
-        ? form.workflow_ids.filter(x => x !== id)
-        : [...form.workflow_ids, id]
-    );
-  };
+  const toggleWf = useCallback((id: string) => {
+    setForm(f => ({
+      ...f,
+      workflow_ids: f.workflow_ids.includes(id)
+        ? f.workflow_ids.filter(x => x !== id)
+        : [...f.workflow_ids, id],
+    }));
+  }, []);
+
+  const toggleDisabledPortal = useCallback((id: string) => {
+    setForm(f => ({
+      ...f,
+      disabled_child_portal_ids: f.disabled_child_portal_ids.includes(id)
+        ? f.disabled_child_portal_ids.filter(x => x !== id)
+        : [...f.disabled_child_portal_ids, id],
+    }));
+  }, []);
 
   const handleSave = async () => {
     if (!form.name.trim()) { toast.warning('请填写超级入口名称'); return; }
@@ -152,6 +265,10 @@ const PortalModal: React.FC<PortalModalProps> = ({ portal, workflows, onClose, o
   };
 
   const modelOptions = MODELS[form.provider] ?? [];
+  const selectableChildPortals = useMemo(
+    () => portals.filter(p => !p.is_default && p.id !== portal?.id),
+    [portals, portal?.id]
+  );
 
   return (
     <div className={styles.overlay} onClick={onClose}>
@@ -196,37 +313,47 @@ const PortalModal: React.FC<PortalModalProps> = ({ portal, workflows, onClose, o
           <label className={styles.label}>
             选择工作流（已选 {form.workflow_ids.length} 个）
           </label>
-          <div className={styles.wfList}>
-            {workflows.length === 0 ? (
-              <div className={styles.wfEmpty}>暂无已发布的工作流</div>
-            ) : (
-              workflows.map(wf => {
-                const checked = form.workflow_ids.includes(wf.id);
-                return (
-                  <div
-                    key={wf.id}
-                    className={`${styles.wfItem} ${checked ? styles.wfItemChecked : ''}`}
-                    onClick={() => toggleWf(wf.id)}
-                  >
-                    <input
-                      type="checkbox"
-                      className={styles.wfCheckbox}
-                      checked={checked}
-                      onChange={() => {}}
-                    />
-                    <div className={styles.wfItemInfo}>
-                      <div className={styles.wfItemName}>{wf.name}</div>
-                      {wf.description && (
-                        <div className={styles.wfItemDesc}>{wf.description}</div>
-                      )}
-                    </div>
-                    <div className={styles.wfItemMeta}>{wf.agent_count} 个 agent</div>
-                  </div>
-                );
-              })
-            )}
-          </div>
+          <WorkflowSelector
+            workflows={workflows}
+            selectedIds={form.workflow_ids}
+            onToggle={toggleWf}
+          />
         </div>
+
+        {form.is_default && (
+          <>
+            <div className={styles.sectionDivider}>Portal 分层路由</div>
+            <div
+              className={styles.wfItem}
+              style={{ border: '1px solid var(--color-secondary)', borderRadius: 8 }}
+              onClick={() => set('auto_discover_child_portals', !form.auto_discover_child_portals)}
+            >
+              <input
+                type="checkbox"
+                className={styles.wfCheckbox}
+                checked={form.auto_discover_child_portals}
+                onChange={() => {}}
+              />
+              <div className={styles.wfItemInfo}>
+                <div className={styles.wfItemName}>自动发现子 Portal</div>
+                <div className={styles.wfItemDesc}>Root 会自动将非默认 Portal 作为一级路由候选</div>
+              </div>
+            </div>
+
+            {form.auto_discover_child_portals && (
+              <div className={styles.formGroup} style={{ marginTop: 10 }}>
+                <label className={styles.label}>
+                  排除/禁用列表（已排除 {form.disabled_child_portal_ids.length} 个）
+                </label>
+                <DisabledPortalSelector
+                  portals={selectableChildPortals}
+                  selectedIds={form.disabled_child_portal_ids}
+                  onToggle={toggleDisabledPortal}
+                />
+              </div>
+            )}
+          </>
+        )}
 
         {/* LLM config */}
         <div className={styles.sectionDivider}>LLM 配置</div>
@@ -495,6 +622,9 @@ const PortalList: React.FC<PortalListProps> = ({ onOpenChat }) => {
       name: form.name,
       description: form.description,
       workflow_ids: form.workflow_ids,
+      child_portal_ids: form.child_portal_ids,
+      auto_discover_child_portals: form.auto_discover_child_portals,
+      disabled_child_portal_ids: form.disabled_child_portal_ids,
       provider: form.provider,
       model: form.model,
       api_key: form.api_key || undefined,
@@ -518,6 +648,13 @@ const PortalList: React.FC<PortalListProps> = ({ onOpenChat }) => {
   const handleDelete = async (portal: Portal) => {
     if (!confirm(`确认删除超级入口「${portal.name}」？`)) return;
     await (api as any).deletePortal(portal.id);
+    const cachePrefix = `proton.portal.session.${portal.id}.`;
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(cachePrefix)) {
+        localStorage.removeItem(key);
+      }
+    }
     await loadAll();
   };
 
@@ -641,6 +778,7 @@ const PortalList: React.FC<PortalListProps> = ({ onOpenChat }) => {
       {createOpen && (
         <PortalModal
           portal={null}
+          portals={portals}
           workflows={workflows}
           onClose={() => setCreateOpen(false)}
           onSave={handleSave}
@@ -651,6 +789,7 @@ const PortalList: React.FC<PortalListProps> = ({ onOpenChat }) => {
       {editTarget && (
         <PortalModal
           portal={editTarget}
+          portals={portals}
           workflows={workflows}
           onClose={() => setEditTarget(null)}
           onSave={handleSave}

@@ -33,7 +33,8 @@ Your job is to:
 4. If the request is ambiguous AND cannot be reasonably resolved from context, set clarification_needed=true.
 
 RULES:
-- Always select at least one child unless clarification is truly required.
+- Select children ONLY when semantically relevant to the user request.
+- If none are relevant, return an empty dispatch_plans array.
 - Children with the same priority value will be executed in PARALLEL; use different priorities to force sequential execution.
 - Keep sub-queries focused — do NOT pad them with unrelated information.
 - You may select multiple children if the request spans multiple domains.
@@ -48,7 +49,8 @@ Output JSON schema:
       "workflow_name": "<child_name>",
       "sub_query": "<refined query for this child>",
       "reason": "<why this child was chosen>",
-      "priority": <int — 0 = highest; same value = parallel>
+      "priority": <int — 0 = highest; same value = parallel>,
+      "relevance_score": <float 0..1>
     }
   ],
   "clarification_needed": <bool>,
@@ -80,6 +82,7 @@ class IntentUnderstandingService:
         memory_snapshot: str = "",
         session_retrievals: Optional[List[Dict[str, Any]]] = None,
         max_selected: int = 0,
+        min_relevance_score: float = 0.0,
     ) -> IntentUnderstandingResult:
         """
         Analyse a user query and produce a dispatch plan.
@@ -139,15 +142,40 @@ class IntentUnderstandingService:
             raw = re.sub(r"\n?```$", "", raw)
             data = json.loads(raw)
 
-            dispatch_plans = [
+            raw_dispatch_plans = [
                 WorkflowDispatchPlan(**p) for p in data.get("dispatch_plans", [])
             ]
+            dispatch_plans = list(raw_dispatch_plans)
+            filtered_by_relevance = 0
+
+            # Filter low-relevance selections (if threshold enabled).
+            if min_relevance_score > 0:
+                before = len(dispatch_plans)
+                dispatch_plans = [
+                    p for p in dispatch_plans
+                    if (p.relevance_score is not None and p.relevance_score >= min_relevance_score)
+                ]
+                filtered_by_relevance = max(0, before - len(dispatch_plans))
 
             # Enforce max_selected limit if LLM ignored it
             if max_selected > 0 and len(dispatch_plans) > max_selected:
                 dispatch_plans = dispatch_plans[:max_selected]
 
             memory_ids = [m.id for m in (memories or [])]
+            if dispatch_plans:
+                routing_status = "matched"
+                routing_note = None
+            elif filtered_by_relevance > 0:
+                routing_status = "filtered_by_relevance"
+                routing_note = (
+                    f"all {filtered_by_relevance} candidate(s) below relevance threshold {min_relevance_score}"
+                )
+            elif data.get("clarification_needed", False):
+                routing_status = "no_match"
+                routing_note = "clarification required before dispatch"
+            else:
+                routing_status = "no_match"
+                routing_note = "no semantically relevant child"
 
             result = IntentUnderstandingResult(
                 original_query=user_query,
@@ -156,33 +184,26 @@ class IntentUnderstandingService:
                 clarification_needed=data.get("clarification_needed", False),
                 clarification_question=data.get("clarification_question"),
                 memories_used=memory_ids,
+                routing_status=routing_status,
+                routing_note=routing_note,
             )
 
             logger.info(
                 f"[Intent] Understood: '{result.understood_intent}' → "
-                f"{len(dispatch_plans)} child(ren) selected"
+                f"{len(dispatch_plans)} child(ren) selected | "
+                f"status={routing_status} | note={routing_note}"
             )
             return result
 
         except Exception as e:
             logger.error(f"[Intent] Understanding failed: {e}")
-            # Graceful fallback: dispatch to all children
-            fallback_plans = [
-                WorkflowDispatchPlan(
-                    workflow_id=c["id"],
-                    workflow_name=c.get("name", c["id"]),
-                    sub_query=user_query,
-                    reason="Fallback: intent understanding failed",
-                    priority=0,
-                )
-                for c in available_children
-            ]
-            if max_selected > 0:
-                fallback_plans = fallback_plans[:max_selected]
+            # Safe fallback: do not force dispatch when intent parsing fails.
             return IntentUnderstandingResult(
                 original_query=user_query,
                 understood_intent=user_query,
-                dispatch_plans=fallback_plans,
+                dispatch_plans=[],
+                routing_status="intent_error",
+                routing_note=f"intent parsing failed: {str(e)[:200]}",
             )
 
     # ------------------------------------------------------------------ #
@@ -196,6 +217,8 @@ class IntentUnderstandingService:
         memories: Optional[List[PortalMemoryEntry]] = None,
         memory_snapshot: str = "",
         session_retrievals: Optional[List[Dict[str, Any]]] = None,
+        max_selected: int = 0,
+        min_relevance_score: float = 0.0,
     ) -> IntentUnderstandingResult:
         """Alias for understand() — used by Portal for workflow-level routing."""
         return await self.understand(
@@ -205,6 +228,8 @@ class IntentUnderstandingService:
             memories=memories,
             memory_snapshot=memory_snapshot,
             session_retrievals=session_retrievals,
+            max_selected=max_selected,
+            min_relevance_score=min_relevance_score,
         )
 
     # ------------------------------------------------------------------ #

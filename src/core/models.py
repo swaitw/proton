@@ -758,6 +758,7 @@ class WorkflowDispatchPlan(BaseModel):
     sub_query: str                        # Refined query tailored for this child
     reason: str                           # Why this child was selected
     priority: int = 0                    # Execution order; same value = parallel
+    relevance_score: Optional[float] = None  # Semantic relevance score [0,1]
 
 
 class IntentUnderstandingResult(BaseModel):
@@ -770,6 +771,8 @@ class IntentUnderstandingResult(BaseModel):
     clarification_needed: bool = False
     clarification_question: Optional[str] = None
     memories_used: List[str] = Field(default_factory=list)  # Memory IDs that influenced this
+    routing_status: str = "matched"  # matched | no_match | filtered_by_relevance | intent_error
+    routing_note: Optional[str] = None
 
 
 class SuperPortalConfig(BaseModel):
@@ -786,6 +789,8 @@ class SuperPortalConfig(BaseModel):
 
     # Bound workflow IDs (must all be published)
     workflow_ids: List[str] = Field(default_factory=list)
+    # Optional child portals for hierarchical routing (Root -> child portal -> workflows)
+    child_portal_ids: List[str] = Field(default_factory=list)
 
     # LLM config for intent understanding & response synthesis
     provider: str = "openai"
@@ -813,6 +818,10 @@ class SuperPortalConfig(BaseModel):
     # Root Portal settings
     is_default: bool = False              # Mark as system default entry portal
     auto_include_published: bool = False  # Auto-include all published workflows
+    auto_discover_child_portals: bool = True  # Root auto-discovers non-default portals
+    disabled_child_portal_ids: List[str] = Field(default_factory=list)  # Exclusion/disable list
+    max_portals_per_request: int = 1      # Max child portals selected in one turn
+    max_workflows_per_request: int = 3    # Max workflows selected in one turn
     fallback_to_copilot: bool = True      # Fallback to Copilot guidance when no workflow
     backbone_system_prompt: str = "You are a helpful AI assistant. Answer the user's question directly, clearly, and concisely. Use Markdown formatting where appropriate."
 
@@ -831,8 +840,11 @@ class SuperPortalConfig(BaseModel):
 class PortalEventType(str, Enum):
     """Event types streamed from the Super Portal."""
     INTENT_UNDERSTOOD = "intent_understood"         # Intent analysis complete
+    PORTAL_DISPATCH_START = "portal_dispatch_start"      # Starting a child portal dispatch
+    PORTAL_DISPATCH_RESULT = "portal_dispatch_result"    # Child portal returned result
     WORKFLOW_DISPATCH_START = "workflow_dispatch_start"  # Starting a workflow
     WORKFLOW_DISPATCH_RESULT = "workflow_dispatch_result"  # Workflow returned result
+    WORKFLOW_EXECUTION_EVENT = "workflow_execution_event"  # Node-level execution trace event
     SYNTHESIS_START = "synthesis_start"             # Starting final answer synthesis
     SAFETY_BLOCKED = "safety_blocked"               # Blocked by pre-generation safety scan
     CONTENT = "content"                             # Streaming content delta

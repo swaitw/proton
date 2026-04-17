@@ -320,6 +320,7 @@ const CopilotPanel: React.FC<CopilotPanelProps> = ({
                   <option value="glm-4">GLM-4</option>
                   <option value="glm-4-plus">GLM-4 Plus</option>
                   <option value="glm-4-air">GLM-4 Air</option>
+                  <option value="glm-4.5-air">GLM-4.5 Air</option>
                   <option value="glm-4-airx">GLM-4 AirX</option>
                   <option value="glm-4-flash">GLM-4 Flash</option>
                   <option value="glm-4v">GLM-4V (视觉)</option>

@@ -586,7 +586,7 @@ def create_app() -> FastAPI:
                     workflow_id, request.message
                 ):
                     event_data = event.model_dump(exclude_none=True)
-                    yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(event_data, ensure_ascii=False, default=str)}\n\n"
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
@@ -1880,6 +1880,9 @@ def create_app() -> FastAPI:
         """
         Update Copilot configuration at runtime.
 
+        Automatically syncs the model/provider/base_url to all default Root Portals
+        so they always follow the system Copilot settings.
+
         Allows configuring:
         - provider: The LLM provider (openai, zhipu, deepseek, qwen, anthropic, moonshot, yi, baichuan, ollama)
         - model: The LLM model to use (e.g., gpt-4, glm-4, deepseek-chat)
@@ -1894,6 +1897,33 @@ def create_app() -> FastAPI:
             api_key=request.api_key,
             base_url=request.base_url,
         )
+
+        # Auto-sync model/provider/base_url to all default (Root) Portals
+        try:
+            from ..portal import get_portal_manager
+            portal_mgr = get_portal_manager()
+            effective = copilot.get_config()
+            portal_patch = {
+                "provider": effective.get("provider"),
+                "model": effective.get("model"),
+                # Keep Root Portal in strict sync with Copilot base_url.
+                # None means reset to provider default behavior.
+                "base_url": effective.get("base_url"),
+            }
+            for portal_cfg in await portal_mgr.list_portals():
+                if portal_cfg.is_default:
+                    await portal_mgr.update_portal(portal_cfg.id, portal_patch)
+                    logger.info(
+                        "[CopilotConfig] Auto-synced provider='%s' model='%s' base_url='%s' "
+                        "to Root Portal '%s'",
+                        portal_patch.get("provider"),
+                        portal_patch.get("model"),
+                        portal_patch.get("base_url"),
+                        portal_cfg.id,
+                    )
+        except Exception as e:
+            logger.warning(f"[CopilotConfig] Failed to sync to Root Portal: {e}")
+
         return {
             "status": "updated",
             "config": copilot.get_config(),
@@ -1941,7 +1971,7 @@ def create_app() -> FastAPI:
                     # Convert datetime to string
                     if "timestamp" in event_data:
                         event_data["timestamp"] = event_data["timestamp"].isoformat()
-                    yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(event_data, ensure_ascii=False, default=str)}\n\n"
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
@@ -2693,7 +2723,7 @@ def create_app() -> FastAPI:
             async def generate():
                 async for event in workflow.run_stream_with_events(request.message):
                     event_data = event.model_dump(exclude_none=True)
-                    yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(event_data, ensure_ascii=False, default=str)}\n\n"
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
@@ -2742,7 +2772,7 @@ def create_app() -> FastAPI:
             async def generate():
                 async for event in router_workflow.run_stream_with_events(request.message):
                     event_data = event.model_dump(exclude_none=True)
-                    yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(event_data, ensure_ascii=False, default=str)}\n\n"
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(
@@ -2777,6 +2807,7 @@ def create_app() -> FastAPI:
         name: str
         description: str = ""
         workflow_ids: List[str] = Field(default_factory=list)
+        child_portal_ids: List[str] = Field(default_factory=list)
         provider: str = "openai"
         model: str = "gpt-4"
         api_key: Optional[str] = None
@@ -2792,6 +2823,10 @@ def create_app() -> FastAPI:
         mempalace_default_room: str = "general"
         is_default: bool = False
         auto_include_published: bool = False
+        auto_discover_child_portals: bool = True
+        disabled_child_portal_ids: List[str] = Field(default_factory=list)
+        max_portals_per_request: int = 1
+        max_workflows_per_request: int = 3
         fallback_to_copilot: bool = True
         backbone_system_prompt: str = (
             "You are a helpful AI assistant. Answer the user's question directly, "
@@ -2837,6 +2872,7 @@ def create_app() -> FastAPI:
             name=request.name,
             description=request.description,
             workflow_ids=request.workflow_ids,
+            child_portal_ids=request.child_portal_ids,
             provider=request.provider,
             model=request.model,
             api_key=request.api_key,
@@ -2852,6 +2888,10 @@ def create_app() -> FastAPI:
             mempalace_default_room=request.mempalace_default_room,
             is_default=request.is_default,
             auto_include_published=request.auto_include_published,
+            auto_discover_child_portals=request.auto_discover_child_portals,
+            disabled_child_portal_ids=request.disabled_child_portal_ids,
+            max_portals_per_request=request.max_portals_per_request,
+            max_workflows_per_request=request.max_workflows_per_request,
             fallback_to_copilot=request.fallback_to_copilot,
             backbone_system_prompt=request.backbone_system_prompt,
         )
@@ -3026,9 +3066,11 @@ def create_app() -> FastAPI:
         """
         更新超级入口配置。
 
-        可更新字段：name, description, workflow_ids, provider, model,
+        可更新字段：name, description, workflow_ids, child_portal_ids, provider, model,
         api_key, base_url, memory_enabled, global_memory_enabled,
-        max_session_messages, session_ttl_hours, public
+        max_session_messages, session_ttl_hours, public,
+        auto_discover_child_portals, disabled_child_portal_ids,
+        max_portals_per_request, max_workflows_per_request
         """
         from ..portal import get_portal_manager
         mgr = get_portal_manager()
@@ -3133,10 +3175,8 @@ def create_app() -> FastAPI:
                         user_id=request.user_id,
                         stream=True,
                     ):
-                        data = event.model_dump(exclude_none=True)
-                        if "timestamp" in data:
-                            data["timestamp"] = data["timestamp"].isoformat()
-                        yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                        data = event.model_dump(mode="json", exclude_none=True)
+                        yield f"data: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
                 except Exception as e:
                     logger.exception("[PortalAPI] stream chat failed: portal_id=%s session_id=%s", portal_id, request.session_id)
                     err_payload = {
@@ -3167,9 +3207,7 @@ def create_app() -> FastAPI:
                     user_id=request.user_id,
                     stream=False,
                 ):
-                    d = event.model_dump(exclude_none=True)
-                    if "timestamp" in d:
-                        d["timestamp"] = d["timestamp"].isoformat()
+                    d = event.model_dump(mode="json", exclude_none=True)
                     events.append(d)
                     if event.delta:
                         content_parts.append(event.delta)

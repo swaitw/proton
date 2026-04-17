@@ -1,9 +1,14 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import styles from './PortalChat.module.css';
 import { Portal } from './PortalList';
 import { api } from '../api/client';
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const SESSION_CACHE_PREFIX = 'proton.portal.session.';
+const SESSION_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_NODE_STREAM_CARDS = 40;
+const NODE_THINKING_FLUSH_MS = 80;
+const MAX_TIMELINE_ITEMS = 120;
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                               */
@@ -23,6 +28,14 @@ interface ChatMsg {
   content: string;
   eventType?: string;
   meta?: any;
+}
+
+interface TimelineItem {
+  id: string;
+  label: string;
+  status: 'running' | 'done' | 'error';
+  detail?: string;
+  updatedAt: number;
 }
 
 type ChannelName = 'telegram' | 'dingtalk' | 'weixin' | 'feishu';
@@ -86,6 +99,52 @@ async function createSession(portalId: string, userId: string): Promise<string> 
   return data.session_id;
 }
 
+async function getSession(portalId: string, sessionId: string): Promise<any | null> {
+  const res = await fetch(`${BASE_URL}/api/portals/${portalId}/sessions/${sessionId}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`获取会话失败: ${res.status}`);
+  return await res.json();
+}
+
+function sweepExpiredSessionCache(now = Date.now()) {
+  for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+    const key = localStorage.key(i);
+    if (!key || !key.startsWith(SESSION_CACHE_PREFIX)) continue;
+    const raw = localStorage.getItem(key);
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed?.savedAt && now - Number(parsed.savedAt) > SESSION_CACHE_TTL_MS) {
+        localStorage.removeItem(key);
+      }
+    } catch {
+      // Keep backward compatibility with old plain-string session_id format.
+    }
+  }
+}
+
+function readCachedSessionId(cacheKey: string, now = Date.now()): string | null {
+  const raw = localStorage.getItem(cacheKey);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    const sid = String(parsed?.sessionId || '');
+    const savedAt = Number(parsed?.savedAt || 0);
+    if (!sid || !savedAt || now - savedAt > SESSION_CACHE_TTL_MS) {
+      localStorage.removeItem(cacheKey);
+      return null;
+    }
+    return sid;
+  } catch {
+    // Backward compatibility for legacy plain session id value.
+    return raw;
+  }
+}
+
+function writeCachedSessionId(cacheKey: string, sessionId: string, now = Date.now()) {
+  localStorage.setItem(cacheKey, JSON.stringify({ sessionId, savedAt: now }));
+}
+
 /* ------------------------------------------------------------------ */
 /*  Sub-components                                                      */
 /* ------------------------------------------------------------------ */
@@ -129,6 +188,32 @@ const EventCard: React.FC<{ msg: ChatMsg }> = ({ msg }) => {
     );
   }
 
+  if (eventType === 'portal_dispatch_start') {
+    return (
+      <div className={styles.eventCard}>
+        <div className={styles.eventTitle}>
+          <span>🧭</span>
+          <span className={`${styles.eventChip} ${styles.eventChipBlue}`}>
+            {meta?.workflow_name ?? '子 Portal'}
+          </span>
+          调用中…
+        </div>
+      </div>
+    );
+  }
+
+  if (eventType === 'portal_dispatch_result') {
+    return (
+      <div className={styles.eventCard}>
+        <div className={styles.eventTitle}>
+          <span>✅</span>
+          <span className={styles.eventChip}>{meta?.workflow_name ?? '子 Portal'}</span>
+          返回结果
+        </div>
+      </div>
+    );
+  }
+
   if (eventType === 'workflow_dispatch_result') {
     return (
       <div className={styles.eventCard}>
@@ -154,6 +239,27 @@ const EventCard: React.FC<{ msg: ChatMsg }> = ({ msg }) => {
     );
   }
 
+  if (eventType === 'node_stream') {
+    const status = meta?.status || 'running';
+    const title = meta?.title || '节点执行';
+    const detail = meta?.detail || '';
+    const text = meta?.text || '';
+    const duration = meta?.durationMs ? `${Math.round(meta.durationMs)}ms` : '';
+    const statusEmoji = status === 'done' ? '✅' : status === 'error' ? '❌' : '⚡';
+    const summary = `${statusEmoji} ${title}${duration ? ` · ${duration}` : ''}${detail ? ` · ${detail}` : ''}`;
+    const openByDefault = status !== 'done';
+    return (
+      <div className={styles.eventCard}>
+        <details open={openByDefault} className={styles.nodeDetails}>
+          <summary className={styles.nodeSummary}>{summary}</summary>
+          <div className={styles.nodeBody}>
+            {text ? text : '（等待输出…）'}
+          </div>
+        </details>
+      </div>
+    );
+  }
+
   return null;
 };
 
@@ -166,19 +272,61 @@ const PortalChat: React.FC<PortalChatProps> = ({ portal, onBack, hideBackButton 
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [activeWfs, setActiveWfs] = useState<string[]>([]);
+  const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [channelOpen, setChannelOpen] = useState(false);
 
   const userId = 'default';
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<(() => void) | null>(null);
   const assistantIdRef = useRef<string | null>(null);
+  const synthesisEventIdRef = useRef<string | null>(null);
+  const nodeCardIdRef = useRef<Record<string, string>>({});
+  const nodePendingRef = useRef<Record<string, string>>({});
+  const nodeFlushTimerRef = useRef<number | null>(null);
+  const sessionStorageKey = `proton.portal.session.${portal.id}.${userId}`;
 
   // Init session
   useEffect(() => {
-    createSession(portal.id, userId).then(setSessionId).catch(console.error);
-    return () => abortRef.current?.();
-  }, [portal.id]);
+    let cancelled = false;
+    (async () => {
+      try {
+        sweepExpiredSessionCache();
+        const cachedSessionId = readCachedSessionId(sessionStorageKey);
+        if (cachedSessionId) {
+          const session = await getSession(portal.id, cachedSessionId);
+          if (session && !cancelled) {
+            setSessionId(cachedSessionId);
+            const restored: ChatMsg[] = (session.messages || [])
+              .filter((m: any) => m?.role === 'user' || m?.role === 'assistant')
+              .map((m: any) => ({
+                id: Math.random().toString(36).slice(2),
+                role: m.role,
+                content: String(m.content || ''),
+              }));
+            setMessages(restored);
+            return;
+          }
+          localStorage.removeItem(sessionStorageKey);
+        }
+
+        const sid = await createSession(portal.id, userId);
+        if (!cancelled) {
+          writeCachedSessionId(sessionStorageKey, sid);
+          setSessionId(sid);
+          setMessages([]);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    })();
+    return () => {
+      if (nodeFlushTimerRef.current) {
+        window.clearTimeout(nodeFlushTimerRef.current);
+        nodeFlushTimerRef.current = null;
+      }
+      abortRef.current?.();
+    };
+  }, [portal.id, sessionStorageKey, userId]);
 
   // Auto-scroll
   useEffect(() => {
@@ -187,15 +335,74 @@ const PortalChat: React.FC<PortalChatProps> = ({ portal, onBack, hideBackButton 
 
   const uid = () => Math.random().toString(36).slice(2);
 
+  const flushPendingNodeText = useCallback(() => {
+    const pending = nodePendingRef.current;
+    nodePendingRef.current = {};
+    nodeFlushTimerRef.current = null;
+    const ids = Object.keys(pending);
+    if (ids.length === 0) return;
+    setMessages(prev => prev.map(m => {
+      const delta = pending[m.id];
+      if (!delta) return m;
+      return {
+        ...m,
+        meta: {
+          ...(m.meta || {}),
+          status: 'running',
+          text: `${m.meta?.text || ''}${delta}`,
+        },
+      };
+    }));
+  }, []);
+
+  const queueNodeTextDelta = useCallback((cardId: string, delta: string) => {
+    nodePendingRef.current[cardId] = `${nodePendingRef.current[cardId] || ''}${delta}`;
+    if (nodeFlushTimerRef.current === null) {
+      nodeFlushTimerRef.current = window.setTimeout(flushPendingNodeText, NODE_THINKING_FLUSH_MS);
+    }
+  }, [flushPendingNodeText]);
+
+  const upsertTimeline = (
+    id: string,
+    patch: Omit<TimelineItem, 'id' | 'updatedAt'> & Partial<Pick<TimelineItem, 'detail'>>
+  ) => {
+    setTimeline(prev => {
+      const now = Date.now();
+      const idx = prev.findIndex(x => x.id === id);
+      let next: TimelineItem[];
+      if (idx < 0) {
+        next = [...prev, { id, updatedAt: now, ...patch }];
+      } else {
+        next = [...prev];
+        next[idx] = { ...next[idx], ...patch, updatedAt: now };
+      }
+      if (next.length > MAX_TIMELINE_ITEMS) {
+        next = next.slice(next.length - MAX_TIMELINE_ITEMS);
+      }
+      return next;
+    });
+  };
+
   const appendMsg = (msg: Omit<ChatMsg, 'id'>) =>
     setMessages(prev => [...prev, { ...msg, id: uid() }]);
 
   const updateLastAssistant = (delta: string) => {
     if (!assistantIdRef.current) return;
     const targetId = assistantIdRef.current;
-    setMessages(prev =>
-      prev.map(m => m.id === targetId ? { ...m, content: m.content + delta } : m)
-    );
+    setMessages(prev => {
+      const next = [...prev];
+      const idx = next.findIndex(m => m.id === targetId);
+      if (idx < 0) return prev;
+      const updated = { ...next[idx], content: (next[idx].content || '') + delta };
+      // Keep synthesized output at the bottom of chat.
+      next.splice(idx, 1);
+      next.push(updated);
+      return next;
+    });
+  };
+
+  const updateEventMsgById = (id: string, updater: (m: ChatMsg) => ChatMsg) => {
+    setMessages(prev => prev.map(m => (m.id === id ? updater(m) : m)));
   };
 
   const send = () => {
@@ -203,7 +410,9 @@ const PortalChat: React.FC<PortalChatProps> = ({ portal, onBack, hideBackButton 
     const text = input.trim();
     setInput('');
     setLoading(true);
-    setActiveWfs([]);
+    setTimeline([]);
+    nodeCardIdRef.current = {};
+    synthesisEventIdRef.current = null;
 
     appendMsg({ role: 'user', content: text });
 
@@ -223,28 +432,215 @@ const PortalChat: React.FC<PortalChatProps> = ({ portal, onBack, hideBackButton 
         if (type === 'intent_understood') {
           appendMsg({ role: 'event', content: '', eventType: type, meta: event });
           const plans = event.intent?.dispatch_plans ?? [];
-          setActiveWfs(plans.map((p: any) => p.workflow_id));
+          upsertTimeline(`intent:${event.session_id}`, {
+            label: '意图理解',
+            status: 'done',
+            detail: plans.length > 0 ? `命中 ${plans.length} 个候选` : '未命中明确候选',
+          });
+        } else if (type === 'portal_dispatch_start') {
+          appendMsg({ role: 'event', content: '', eventType: type, meta: event });
+          upsertTimeline(`portal:${event.workflow_id}`, {
+            label: `子Portal: ${event.workflow_name || event.workflow_id}`,
+            status: 'running',
+            detail: '执行中',
+          });
+        } else if (type === 'portal_dispatch_result') {
+          appendMsg({ role: 'event', content: '', eventType: type, meta: event });
+          upsertTimeline(`portal:${event.workflow_id}`, {
+            label: `子Portal: ${event.workflow_name || event.workflow_id}`,
+            status: 'done',
+            detail: '执行完成',
+          });
         } else if (type === 'workflow_dispatch_start') {
           appendMsg({ role: 'event', content: '', eventType: type, meta: event });
+          upsertTimeline(`wf:${event.workflow_id}`, {
+            label: `工作流: ${event.workflow_name || event.workflow_id}`,
+            status: 'running',
+            detail: '执行中',
+          });
         } else if (type === 'workflow_dispatch_result') {
           appendMsg({ role: 'event', content: '', eventType: type, meta: event });
-          setActiveWfs(prev => prev.filter(id => id !== event.workflow_id));
+          upsertTimeline(`wf:${event.workflow_id}`, {
+            label: `工作流: ${event.workflow_name || event.workflow_id}`,
+            status: 'done',
+            detail: '执行完成',
+          });
+        } else if (type === 'workflow_execution_event') {
+          const meta = event.metadata || {};
+          const childType = String(meta.child_event_type || '').toLowerCase();
+          if (childType === 'intent_understood') {
+            const plans = meta.child_event?.intent?.dispatch_plans || [];
+            upsertTimeline(`child-intent:${meta.child_portal_id}`, {
+              label: `子Portal意图: ${meta.child_portal_name || meta.child_portal_id}`,
+              status: 'done',
+              detail: plans.length > 0 ? `命中 ${plans.length} 个 workflow` : '未命中 workflow',
+            });
+            return;
+          }
+          if (childType === 'workflow_dispatch_start') {
+            upsertTimeline(`child-wf:${meta.child_portal_id}:${meta.child_event?.workflow_id}`, {
+              label: `子Portal工作流: ${meta.child_event?.workflow_name || meta.child_event?.workflow_id}`,
+              status: 'running',
+              detail: '执行中',
+            });
+            return;
+          }
+          if (childType === 'workflow_dispatch_result') {
+            upsertTimeline(`child-wf:${meta.child_portal_id}:${meta.child_event?.workflow_id}`, {
+              label: `子Portal工作流: ${meta.child_event?.workflow_name || meta.child_event?.workflow_id}`,
+              status: 'done',
+              detail: '执行完成',
+            });
+            return;
+          }
+          if (childType === 'synthesis_start') {
+            upsertTimeline(`child-syn:${meta.child_portal_id}`, {
+              label: `子Portal综合: ${meta.child_portal_name || meta.child_portal_id}`,
+              status: 'running',
+              detail: '生成中',
+            });
+            return;
+          }
+
+          const ex = meta.execution_event || meta.child_event?.metadata?.execution_event || {};
+          const exType = String(ex.event_type || '').toLowerCase();
+          const childPrefix = meta.child_portal_id ? `child:${meta.child_portal_id}:` : '';
+          const nodeKey = `${childPrefix}${event.workflow_id}:${ex.node_id || ex.node_name || 'unknown'}`;
+          const nodeTitlePrefix = meta.child_portal_name
+            ? `子Portal ${meta.child_portal_name} / `
+            : '';
+          const nodeTitle = `${nodeTitlePrefix}${ex.node_name || ex.node_id || 'unknown'}`;
+          if (exType === 'node_start') {
+            const cardId = uid();
+            nodeCardIdRef.current[nodeKey] = cardId;
+            setMessages(prev => {
+              const eventIds = prev.filter(m => m.eventType === 'node_stream').map(m => m.id);
+              const removeCount = Math.max(0, eventIds.length + 1 - MAX_NODE_STREAM_CARDS);
+              const toRemove = new Set(eventIds.slice(0, removeCount));
+              const kept = removeCount > 0 ? prev.filter(m => !toRemove.has(m.id)) : prev;
+              return [
+                ...kept,
+                {
+                  id: cardId,
+                  role: 'event',
+                  content: '',
+                  eventType: 'node_stream',
+                  meta: {
+                    status: 'running',
+                    title: nodeTitle,
+                    detail: '开始执行',
+                    text: '',
+                  },
+                },
+              ];
+            });
+            upsertTimeline(`${childPrefix}node:${event.workflow_id}:${ex.node_id || ex.node_name}`, {
+              label: `节点: ${ex.node_name || ex.node_id || 'unknown'}`,
+              status: 'running',
+              detail: '开始执行',
+            });
+          } else if (exType === 'node_thinking') {
+            const cardId = nodeCardIdRef.current[nodeKey];
+            if (cardId && ex.delta_content) {
+              queueNodeTextDelta(cardId, String(ex.delta_content));
+            }
+          } else if (exType === 'node_complete') {
+            flushPendingNodeText();
+            const duration = ex.duration_ms ? `${Math.round(ex.duration_ms)}ms` : '完成';
+            const cardId = nodeCardIdRef.current[nodeKey];
+            if (cardId) {
+              updateEventMsgById(cardId, (m) => ({
+                ...m,
+                meta: {
+                  ...(m.meta || {}),
+                  status: 'done',
+                  title: m.meta?.title || nodeTitle,
+                  detail: duration,
+                  durationMs: ex.duration_ms,
+                  text: m.meta?.text || ex.content || '',
+                },
+              }));
+            }
+            upsertTimeline(`${childPrefix}node:${event.workflow_id}:${ex.node_id || ex.node_name}`, {
+              label: `节点: ${ex.node_name || ex.node_id || 'unknown'}`,
+              status: 'done',
+              detail: duration,
+            });
+          } else if (exType === 'node_error' || exType === 'workflow_error') {
+            flushPendingNodeText();
+            const cardId = nodeCardIdRef.current[nodeKey];
+            if (cardId) {
+              updateEventMsgById(cardId, (m) => ({
+                ...m,
+                meta: {
+                  ...(m.meta || {}),
+                  status: 'error',
+                  title: m.meta?.title || nodeTitle,
+                  detail: ex.error || '执行错误',
+                },
+              }));
+            }
+            upsertTimeline(`${childPrefix}node:${event.workflow_id}:${ex.node_id || ex.node_name || exType}`, {
+              label: `节点: ${ex.node_name || ex.node_id || 'unknown'}`,
+              status: 'error',
+              detail: ex.error || '执行错误',
+            });
+          } else if (exType === 'workflow_start') {
+            upsertTimeline(`${childPrefix}wfstream:${event.workflow_id}`, {
+              label: `工作流轨迹: ${event.workflow_name || event.workflow_id}`,
+              status: 'running',
+              detail: '开始',
+            });
+          } else if (exType === 'workflow_complete') {
+            const duration = ex.duration_ms ? `${Math.round(ex.duration_ms)}ms` : '完成';
+            upsertTimeline(`${childPrefix}wfstream:${event.workflow_id}`, {
+              label: `工作流轨迹: ${event.workflow_name || event.workflow_id}`,
+              status: 'done',
+              detail: duration,
+            });
+          }
         } else if (type === 'synthesis_start') {
-          appendMsg({ role: 'event', content: '', eventType: type, meta: event });
+          const eid = uid();
+          synthesisEventIdRef.current = eid;
+          setMessages(prev => [...prev, { id: eid, role: 'event', content: '', eventType: type, meta: event }]);
+          upsertTimeline(`synthesis:${event.session_id}`, {
+            label: '结果综合',
+            status: 'running',
+            detail: '生成中',
+          });
         } else if (type === 'content' && event.delta) {
+          if (synthesisEventIdRef.current) {
+            const sid = synthesisEventIdRef.current;
+            setMessages(prev => prev.filter(m => m.id !== sid));
+            synthesisEventIdRef.current = null;
+          }
           updateLastAssistant(event.delta);
         } else if (type === 'error') {
           updateLastAssistant(`\n\n❌ 错误：${event.error}`);
+          upsertTimeline(`error:${event.session_id}`, {
+            label: '执行错误',
+            status: 'error',
+            detail: event.error || 'unknown',
+          });
         }
       },
       () => {
         setLoading(false);
+        if (synthesisEventIdRef.current) {
+          const sid = synthesisEventIdRef.current;
+          setMessages(prev => prev.filter(m => m.id !== sid));
+          synthesisEventIdRef.current = null;
+        }
         assistantIdRef.current = null;
-        setActiveWfs([]);
       },
       (err) => {
         updateLastAssistant(`\n\n❌ 请求失败：${err.message}`);
         setLoading(false);
+        if (synthesisEventIdRef.current) {
+          const sid = synthesisEventIdRef.current;
+          setMessages(prev => prev.filter(m => m.id !== sid));
+          synthesisEventIdRef.current = null;
+        }
         assistantIdRef.current = null;
       }
     );
@@ -343,22 +739,26 @@ const PortalChat: React.FC<PortalChatProps> = ({ portal, onBack, hideBackButton 
 
         {/* Side panel: bound workflows */}
         <div className={styles.sidePanel}>
-          <div className={styles.sidePanelHeader}>绑定的工作流</div>
+          <div className={styles.sidePanelHeader}>执行时间线</div>
           <div className={styles.sidePanelBody}>
-            {portal.workflow_ids.length === 0 ? (
+            {timeline.length === 0 ? (
               <div style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', textAlign: 'center', marginTop: 20 }}>
-                未绑定工作流
+                等待执行事件…
               </div>
             ) : (
-              portal.workflow_ids.map(id => (
+              [...timeline]
+                .sort((a, b) => a.updatedAt - b.updatedAt)
+                .map(item => (
                 <div
-                  key={id}
-                  className={`${styles.wfChip} ${activeWfs.includes(id) ? styles.wfChipActive : ''}`}
+                  key={item.id}
+                  className={`${styles.wfChip} ${item.status === 'running' ? styles.wfChipActive : ''}`}
                 >
-                  {activeWfs.includes(id) ? '⚡ ' : ''}
-                  <span style={{ fontSize: '0.75rem', fontFamily: 'monospace', opacity: 0.6 }}>
-                    {id.slice(0, 8)}…
-                  </span>
+                  <div className={styles.timelineTitle}>
+                    <span>
+                      {item.status === 'running' ? '⚡' : item.status === 'done' ? '✅' : '❌'} {item.label}
+                    </span>
+                  </div>
+                  {item.detail && <div className={styles.timelineDetail}>{item.detail}</div>}
                 </div>
               ))
             )}

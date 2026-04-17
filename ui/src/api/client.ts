@@ -972,6 +972,11 @@ export const api = {
     name: string;
     description?: string;
     workflow_ids: string[];
+    child_portal_ids?: string[];
+    auto_discover_child_portals?: boolean;
+    disabled_child_portal_ids?: string[];
+    max_portals_per_request?: number;
+    max_workflows_per_request?: number;
     provider?: string;
     model?: string;
     api_key?: string;
