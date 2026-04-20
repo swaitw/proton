@@ -1,6 +1,8 @@
-# Proton Agent Platform
+# Proton
 
-基于 Microsoft Agent Framework 的树形 Agent 编排平台。
+核心驱动思想是“一切皆能力”
+
+一个树形Agent平台，通过树形结构减少意图路由的复杂度，提高Agent的可扩展性和可维护性。
 
 ## 特性
 
